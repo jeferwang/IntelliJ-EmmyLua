@@ -28,6 +28,7 @@ import com.intellij.openapi.fileEditor.FileDocumentManager;
 import com.intellij.xdebugger.XDebugProcess;
 import com.intellij.xdebugger.XDebugProcessStarter;
 import com.intellij.xdebugger.XDebugSession;
+import com.intellij.xdebugger.XSessionStartedResult;
 import com.intellij.xdebugger.XDebuggerManager;
 import com.tang.intellij.lua.debugger.LuaRunner;
 import org.jetbrains.annotations.NotNull;
@@ -57,8 +58,7 @@ public class LuaAppRunner extends LuaRunner {
 
         // debug
         if (environment.getExecutor().getId().equals(DefaultDebugExecutor.EXECUTOR_ID)) {
-            XDebugSession session = createSession(environment);
-            return session.getRunContentDescriptor();
+            return createSession(environment).getRunContentDescriptor();
         }
 
         // execute
@@ -70,15 +70,18 @@ public class LuaAppRunner extends LuaRunner {
         return null;
     }
 
-    private XDebugSession createSession(ExecutionEnvironment environment) throws ExecutionException {
+    private XSessionStartedResult createSession(ExecutionEnvironment environment) throws ExecutionException {
         XDebuggerManager manager = XDebuggerManager.getInstance(environment.getProject());
-        return manager.startSession(environment, new XDebugProcessStarter() {
+        XDebugProcessStarter starter = new XDebugProcessStarter() {
             @NotNull
             @Override
             public XDebugProcess start(@NotNull XDebugSession xDebugSession) throws ExecutionException {
                 LuaAppRunConfiguration configuration = (LuaAppRunConfiguration) environment.getRunProfile();
                 return new LuaAppMobProcess(xDebugSession);
             }
-        });
+        };
+        return manager.newSessionBuilder(starter)
+                .environment(environment)
+                .startSession();
     }
 }
