@@ -46,10 +46,10 @@ data class BuildData(
 
 val buildDataList = listOf(
     BuildData(
-        ideaSDKShortVersion = "2026.2",
-        ideaSDKVersion = "2026.2",
-        sinceBuild = "253",
-        untilBuild = "262.*",
+        ideaSDKShortVersion = "2026.3",
+        ideaSDKVersion = "2026.3",
+        sinceBuild = "263",
+        untilBuild = "263.*",
         bunch = "212",
         targetCompatibilityLevel = JavaVersion.VERSION_21,
         buildJdkVersion = JavaVersion.VERSION_25,
@@ -60,6 +60,11 @@ val buildDataList = listOf(
 val buildVersion = System.getProperty("IDEA_VER") ?: buildDataList.first().ideaSDKShortVersion
 
 val buildVersionData = buildDataList.find { it.ideaSDKShortVersion == buildVersion }!!
+
+// Prefer an installed IntelliJ IDEA as the Platform SDK when configured locally.
+val localIde = providers.gradleProperty("org.jetbrains.intellij.platform.localIde")
+    .map { file(it) }
+    .orElse(providers.environmentVariable("LOCAL_IDEA_HOME").map { file(it) })
 
 val emmyDebuggerVersion = "1.3.0"
 
@@ -167,8 +172,15 @@ project(":") {
         implementation("org.luaj:luaj-jse:3.0.1")
         implementation("com.jgoodies:forms:1.2.1")
         intellijPlatform {
-            intellijIdeaUltimate(buildVersionData.ideaSDKVersion)
+            if (localIde.isPresent) {
+                local(localIde.get())
+            } else {
+                intellijIdeaUltimate(buildVersionData.ideaSDKVersion)
+            }
+            bundledModule("intellij.platform.debugger.impl.shared")
             bundledModule("intellij.spellchecker")
+            bundledModule("intellij.platform.debugger")
+            bundledModule("intellij.platform.debugger.impl")
         }
     }
 
@@ -222,7 +234,8 @@ project(":") {
 
     tasks {
         buildPlugin {
-            dependsOn("bunch", "installEmmyDebugger")
+            // The compatibility switch resets the Git worktree; the 2026.3 sources are already active.
+            dependsOn("installEmmyDebugger")
             archiveBaseName.set(buildVersionData.archiveName)
             from(fileTree(resDir) { include("!!DONT_UNZIP_ME!!.txt") }) {
                 into("/${project.name}")
