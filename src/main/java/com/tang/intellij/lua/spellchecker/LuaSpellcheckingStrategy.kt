@@ -42,8 +42,9 @@ class LuaSpellcheckingStrategy : SpellcheckingStrategy() {
 private object IdentifierOwnerTokenizer : PsiIdentifierOwnerTokenizer() {
     override fun tokenize(element: PsiNameIdentifierOwner, consumer: TokenConsumer) {
         val id = element.nameIdentifier
-        if (id !is LuaLiteralExpr)
-            super.tokenize(element, consumer)
+        if (id !is LuaLiteralExpr) {
+            withRiderDictionaryFallback { super.tokenize(element, consumer) }
+        }
     }
 }
 
@@ -51,7 +52,22 @@ private object StringLiteralTokenizer : EscapeSequenceTokenizer<LuaLiteralExpr>(
 
     override fun tokenize(element: LuaLiteralExpr, consumer: TokenConsumer) {
         if (element.kind == LuaLiteralKind.String) {
-            consumer.consumeToken(element, PlainTextSplitter.getInstance())
+            withRiderDictionaryFallback {
+                consumer.consumeToken(element, PlainTextSplitter.getInstance())
+            }
+        }
+    }
+}
+
+private inline fun withRiderDictionaryFallback(checkToken: () -> Unit) {
+    try {
+        checkToken()
+    } catch (error: NotImplementedError) {
+        // Some Rider builds leave this lookup unimplemented. Skip the affected token.
+        val origin = error.stackTrace.firstOrNull()
+        if (origin?.className != "com.jetbrains.rider.spellChecker.layers.BackendEditableDictionaryLayer" ||
+            origin.methodName != "lookup") {
+            throw error
         }
     }
 }
