@@ -16,6 +16,7 @@
 
 package com.tang.intellij.lua.debugger
 
+import com.intellij.openapi.application.ApplicationManager
 import com.intellij.openapi.editor.Document
 import com.intellij.openapi.project.IndexNotReadyException
 import com.intellij.openapi.project.Project
@@ -34,9 +35,10 @@ import com.tang.intellij.lua.psi.*
 abstract class LuaDebuggerEvaluator : XDebuggerEvaluator() {
     override fun getExpressionRangeAtOffset(project: Project, document: Document, offset: Int, sideEffectsAllowed: Boolean): TextRange? {
         var currentRange: TextRange? = null
-        PsiDocumentManager.getInstance(project).commitAndRunReadAction {
+        val documentManager = PsiDocumentManager.getInstance(project)
+        val computeRange = Runnable {
             try {
-                val file = PsiDocumentManager.getInstance(project).getPsiFile(document) ?: return@commitAndRunReadAction
+                val file = documentManager.getPsiFile(document) ?: return@Runnable
                 if (currentRange == null) {
                     val ele = file.findElementAt(offset)
                     if (ele != null && ele.node.elementType == LuaTypes.ID) {
@@ -61,6 +63,12 @@ abstract class LuaDebuggerEvaluator : XDebuggerEvaluator() {
                 }
             } catch (ignored: IndexNotReadyException) {
             }
+        }
+        // New debugger backends already hold a read lock; committing here can deadlock.
+        if (ApplicationManager.getApplication().isReadAccessAllowed) {
+            computeRange.run()
+        } else {
+            documentManager.commitAndRunReadAction(computeRange)
         }
         return currentRange
     }
