@@ -62,7 +62,11 @@ private object StringLiteralTokenizer : EscapeSequenceTokenizer<LuaLiteralExpr>(
 private inline fun withRiderDictionaryFallback(checkToken: () -> Unit) {
     try {
         checkToken()
-    } catch (error: NotImplementedError) {
+    } catch (error: Error) {
+        // Rider and the plugin can load separate copies of Kotlin's NotImplementedError.
+        if (error.javaClass.name != "kotlin.NotImplementedError") {
+            throw error
+        }
         // Some Rider builds leave this lookup unimplemented. Skip the affected token.
         val origin = error.stackTrace.firstOrNull()
         if (origin?.className != "com.jetbrains.rider.spellChecker.layers.BackendEditableDictionaryLayer" ||
