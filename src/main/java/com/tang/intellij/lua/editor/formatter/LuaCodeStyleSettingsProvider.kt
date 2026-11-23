@@ -30,6 +30,8 @@ import com.tang.intellij.lua.lang.LuaLanguage
  * Created by tangzx on 2017/2/22.
  */
 class LuaCodeStyleSettingsProvider : CodeStyleSettingsProvider() {
+    override fun getLanguage() = LuaLanguage.INSTANCE
+
     override fun createConfigurable(
         settings: CodeStyleSettings,
         modelSettings: CodeStyleSettings
