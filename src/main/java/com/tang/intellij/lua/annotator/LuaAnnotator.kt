@@ -251,6 +251,15 @@ class LuaAnnotator : Annotator {
     }
 
     internal inner class LuaDocElementVisitor : LuaDocVisitor() {
+        override fun visitCommentString(o: LuaDocCommentString) {
+            val reference = o.reference ?: return
+            if (reference.resolve() == null) return
+            myHolder?.newSilentAnnotation(HighlightSeverity.INFORMATION)
+                ?.range(reference.rangeInElement.shiftRight(o.textRange.startOffset))
+                ?.textAttributes(LuaHighlightingData.CLASS_REFERENCE)
+                ?.create()
+        }
+
         override fun visitTagClass(o: LuaDocTagClass) {
             super.visitTagClass(o)
             newInfoAnnotation(o.id, null) {

@@ -273,6 +273,7 @@ tag_type ::= TAG_NAME_TYPE ty comment_string? {
 }
 
 comment_string ::= STRING_BEGIN? STRING? {
+    mixin = "com.tang.intellij.lua.comment.psi.LuaDocCommentStringMixin"
     //pin = 1
     methods = [
         string = "STRING"
