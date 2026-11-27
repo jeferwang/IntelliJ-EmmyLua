@@ -64,13 +64,16 @@ abstract class LuaDebuggerEvaluator : XDebuggerEvaluator() {
             } catch (ignored: IndexNotReadyException) {
             }
         }
-        // New debugger backends already hold a read lock; committing here can deadlock.
-        if (ApplicationManager.getApplication().isReadAccessAllowed) {
-            computeRange.run()
-        } else {
+        val application = ApplicationManager.getApplication()
+        val canCommit = !application.isReadAccessAllowed ||
+            (application.isDispatchThread && (application.isWriteIntentLockAcquired || application.isWriteAccessAllowed))
+        // New debugger backends already hold a read lock; committing there can deadlock.
+        if (canCommit) {
             documentManager.commitAndRunReadAction(computeRange)
+        } else if (!documentManager.isUncommited(document)) {
+            computeRange.run()
         }
-        return currentRange
+        return currentRange?.takeIf { it.startOffset >= 0 && it.endOffset <= document.textLength }
     }
 
     override fun evaluate(express: String, xEvaluationCallback: XDebuggerEvaluator.XEvaluationCallback, xSourcePosition: XSourcePosition?) {
