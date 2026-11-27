@@ -132,6 +132,7 @@ class TyAliasSubstitutor private constructor(val project: Project) : ITySubstitu
     }
 
     override fun substitute(clazz: ITyClass): ITy {
+        if (clazz.isAnonymous || clazz.isGlobal) return clazz
         val name = clazz.className
         resolved[name]?.let { return it }
         if (!inProgress.add(name)) {

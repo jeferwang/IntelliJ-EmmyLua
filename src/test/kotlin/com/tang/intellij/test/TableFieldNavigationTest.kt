@@ -98,6 +98,100 @@ class TableFieldNavigationTest : LuaTestBase() {
         list[1] = { itemId = 3 }
     """)
 
+    fun testWrapperAndReassignmentFields() = checkSlotFields("""
+        ---@type LoadoutSnapshotSlot
+        local wrapped = (({ itemId = 1 }))
+        ---@type LoadoutSnapshotSlot
+        local choice = cond and { itemId = 2 } or { itemId = 3 }
+        ---@param existing LoadoutSnapshotSlot
+        local function fallback(existing) return existing or { itemId = 4 } end
+        local item
+        ---@type LoadoutSnapshotSlot
+        item = { itemId = 5 }
+        local function update(self)
+            ---@type LoadoutSnapshotSlot
+            self.slot = { itemId = 6 }
+        end
+        ---@type LoadoutSnapshotSlot
+        local second
+        ---@type number
+        item, second = 0, { itemId = 7 }
+    """)
+
+    fun testParenthesizedClassInitializerKeepsItsFields() {
+        val file = myFixture.configureByText("Class.lua", """
+            ---@class Wrapped
+            local C = (({ itemId = 1 }))
+            ---@type Wrapped
+            local other
+            local id = other.itemId
+        """.trimIndent())
+        assertEquals(file.text.indexOf("itemId"), file.findReferenceAt(file.text.lastIndexOf("itemId"))?.resolve()?.textOffset)
+    }
+
+    fun testInlineExpressionAnnotations() = checkSlotFields("""
+        consume(
+            ---@type LoadoutSnapshotSlot
+            { itemId = 1 })
+        consume(---@type LoadoutSnapshotSlot
+            { itemId = 2 })
+        local function make()
+            return true,
+                ---@type LoadoutSnapshotSlot
+                { itemId = 3 }
+        end
+        local ok, returned = make()
+        local id = returned.itemId
+        local first, item = true,
+            ---@type LoadoutSnapshotSlot
+            ({ itemId = 4 })
+        id = item.itemId
+        local choice = cond and
+            ---@type LoadoutSnapshotSlot
+            { itemId = 5 }
+            or
+            ---@type LoadoutSnapshotSlot
+            { itemId = 6 }
+        local single =
+            ---@type LoadoutSnapshotSlot
+            { itemId = 7 }
+        id = single.itemId
+        local function firstSlot()
+            return
+                ---@type LoadoutSnapshotSlot
+                { itemId = 8 }
+        end
+        id = firstSlot().itemId
+    """)
+
+    fun testUntypedBranchesConditionsAndDetachedComments() {
+        val file = myFixture.configureByText("Negative.lua", """
+            ---@class Slot
+            ---@field itemId number
+            local Slot = {}
+            ---@type Slot
+            local typed = { itemId = 0 } and {}
+            local untyped = cond and { itemId = 1 } or { itemId = 2 }
+            consume(bar, ---@type Slot
+                { itemId = 3 })
+            consume(
+                ---@type Slot
+
+                { itemId = 4 })
+            consume(bar ---@type Slot
+                , { itemId = 5 })
+            ---@type table<"only", Slot>
+            local map = {}
+            local missing = map["other"].itemId
+        """.trimIndent())
+        for (value in 0..5) {
+            val offset = file.text.indexOf("itemId = $value")
+            assertTrue(offset >= 0)
+            assertNull(file.findReferenceAt(offset)?.resolve())
+        }
+        assertNull(file.findReferenceAt(file.text.lastIndexOf("itemId"))?.resolve())
+    }
+
     fun testUnannotatedClosureReturnKeyRemainsADeclaration() {
         val file = myFixture.configureByText("Closure.lua", """
             local f = function() return { itemId = 1 } end

@@ -43,7 +43,10 @@ fun inferExpr(expr: LuaExpr?, context: SearchContext): ITy {
     return inferExprInner(expr, context)
 }
 
-private fun inferExprInner(expr: LuaPsiElement, context: SearchContext): ITy {
+private fun inferExprInner(expr: LuaExpr, context: SearchContext): ITy {
+    if ((expr is LuaTableExpr || expr is LuaParenExpr) && !(context.forStub && expr.stub != null)) {
+        expr.leadingInlineDocTy()?.let { return it }
+    }
     return when (expr) {
         is LuaUnaryExpr -> expr.infer(context)
         is LuaBinaryExpr -> expr.infer(context)
@@ -318,7 +321,8 @@ private fun LuaIndexExpr.infer(context: SearchContext): ITy {
             var ty: ITy = Ty.UNKNOWN
 
             // Type[]
-            if (indexExpr.idExpr == null) {
+            val stringKey = indexExpr.idExpr
+            if (stringKey == null) {
                 TyUnion.each(tySet) {
                     if (it is ITyArray) ty = ty.union(it.base)
                 }
@@ -327,7 +331,10 @@ private fun LuaIndexExpr.infer(context: SearchContext): ITy {
 
             // table<number, Type>
             TyUnion.each(tySet) {
-                if (it is ITyGeneric && it.isTableGeneric()) ty = ty.union(it.getParamTy(1))
+                if (it is ITyGeneric && it.isTableGeneric() &&
+                        (stringKey == null || acceptsStringKey(it.getParamTy(0), indexExpr.name))) {
+                    ty = ty.union(it.getParamTy(1))
+                }
             }
             if (ty !is TyUnknown) return@Computable ty
 

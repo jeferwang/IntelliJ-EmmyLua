@@ -65,7 +65,7 @@ class LuaIndexExprType : LuaStubElementType<LuaIndexExprStub, LuaIndexExpr>("IND
 
     override fun createStub(indexExpr: LuaIndexExpr, stubElement: StubElement<*>): LuaIndexExprStub {
         val stat = indexExpr.assignStat
-        val docTy = stat?.comment?.docTy
+        val docTy = indexExpr.docTy
         val classNameSet = mutableSetOf<String>()
 
         if (stat != null) {

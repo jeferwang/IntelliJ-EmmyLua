@@ -48,7 +48,7 @@ class LuaNameExprType : LuaStubElementType<LuaNameExprStub, LuaNameExpr>("NAME_E
         val isGlobal = resolveLocal(luaNameExpr) == null
 
         val stat = luaNameExpr.assignStat
-        val docTy = stat?.comment?.ty
+        val docTy = luaNameExpr.docTy
 
         return LuaNameExprStubImpl(name,
                 module,

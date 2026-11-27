@@ -20,7 +20,9 @@ import com.intellij.extapi.psi.StubBasedPsiElementBase
 import com.intellij.openapi.progress.ProgressManager
 import com.intellij.openapi.util.Computable
 import com.intellij.openapi.util.Key
+import com.intellij.openapi.util.text.StringUtil
 import com.intellij.psi.PsiElement
+import com.intellij.psi.PsiWhiteSpace
 import com.intellij.psi.util.CachedValue
 import com.intellij.psi.util.CachedValueProvider
 import com.intellij.psi.util.CachedValuesManager
@@ -66,11 +68,18 @@ import com.tang.intellij.lua.ty.*
  * }
  */
 private fun LuaExpr.shouldBeInternal(context: SearchContext): ITy {
+    leadingInlineDocTy()?.let { return it }
     val p1 = parent
     if (p1 is LuaExprList) {
         val p2 = p1.parent
         if (p2 is LuaAssignStat && p1 == p2.valueExprList) {
-            val receiver = p2.varExprList.getExprAt(p1.exprStubList.indexOf(this))
+            val index = p1.exprStubList.indexOf(this)
+            if (index < 0) return Ty.UNKNOWN
+            if (index == 0) {
+                val docTy = p2.comment?.ty
+                if (docTy != null && !Ty.isInvalid(docTy)) return docTy
+            }
+            val receiver = p2.varExprList.getExprAt(index)
             if (receiver != null)
                 return infer(receiver, context)
         } else if (p2 is LuaLocalDef) {
@@ -86,6 +95,20 @@ private fun LuaExpr.shouldBeInternal(context: SearchContext): ITy {
             }
             val owner = PsiTreeUtil.getParentOfType(p2, LuaFuncBodyOwner::class.java) ?: return Ty.UNKNOWN
             return owner.expectedReturnSlot(index, context)
+        }
+    } else if (p1 is LuaParenExpr) {
+        return p1.shouldBe(context)
+    } else if (p1 is LuaBinaryExpr) {
+        when (p1.stub?.opType ?: p1.binaryOp.node.firstChildNode?.elementType) {
+            LuaTypes.AND -> if (this == p1.right) return p1.shouldBe(context)
+            LuaTypes.OR -> {
+                val left = p1.left
+                if (this == left || this == p1.right) {
+                    val outer = p1.shouldBe(context)
+                    if (this != left && left != null && !hasConcreteExpectedType(outer)) return infer(left, context)
+                    return outer
+                }
+            }
         }
     } else if (p1 is LuaArgs) {
         val p2 = p1.parent
@@ -147,6 +170,37 @@ private fun LuaExpr.shouldBeInternal(context: SearchContext): ITy {
         return fieldType
     }
     return Ty.UNKNOWN
+}
+
+private fun hasConcreteExpectedType(ty: ITy): Boolean = when (ty) {
+    is TyUnion -> ty.getChildTypes().any(::hasConcreteExpectedType)
+    is ITyClass -> !ty.isAnonymous && !ty.isGlobal
+    is ITyArray, is ITyGeneric, is ITyFunction, is TyStringLiteral -> true
+    else -> false
+}
+
+internal fun LuaExpr.leadingInlineDocTy(): ITy? {
+    var sibling = prevSibling
+    val beforeList = sibling == null
+    if (beforeList) sibling = (parent as? LuaExprList)?.prevSibling ?: return null
+    var breaks = 0
+    while (sibling is PsiWhiteSpace) {
+        breaks += StringUtil.getLineBreakCount(sibling.text)
+        if (breaks > 1) return null
+        sibling = sibling.prevSibling
+    }
+    val comment = sibling as? LuaComment ?: return null
+    var previous = PsiTreeUtil.prevLeaf(comment)
+    var ownLine = false
+    while (previous is PsiWhiteSpace) {
+        if (StringUtil.getLineBreakCount(previous.text) > 0) ownLine = true
+        previous = PsiTreeUtil.prevLeaf(previous)
+    }
+    val token = previous?.node?.elementType
+    if (beforeList && token != LuaTypes.ASSIGN && token != LuaTypes.RETURN) return null
+    if (!ownLine && previous != null && token != LuaTypes.LPAREN && token != LuaTypes.ASSIGN &&
+            token != LuaTypes.RETURN && token != LuaTypes.AND && token != LuaTypes.OR) return null
+    return comment.ty?.takeUnless { Ty.isInvalid(it) }
 }
 
 internal fun extractReturnSlot(ty: ITy, index: Int): ITy = when (ty) {
@@ -425,23 +479,13 @@ val LuaComment.ty: ITy? get() {
 
 val LuaDocTagClass.aliasName: String? get() {
     val owner = LuaCommentUtil.findOwner(this)
-    when (owner) {
-        is LuaAssignStat -> {
-            val expr = owner.valueExprList?.getExprAt(0)
-            if (expr is LuaTableExpr)
-                return getTableTypeName(expr)
-            /*val expr = owner.getExprAt(0)
-            if (expr is LuaNameExpr)
-                return getGlobalTypeName(expr)*/
-        }
-
-        is LuaLocalDef -> {
-            val expr = owner.exprList?.getExprAt(0)
-            if (expr is LuaTableExpr)
-                return getTableTypeName(expr)
-        }
+    var expr = when (owner) {
+        is LuaAssignStat -> owner.valueExprList?.getExprAt(0)
+        is LuaLocalDef -> owner.exprList?.getExprAt(0)
+        else -> null
     }
-    return null
+    while (expr is LuaParenExpr) expr = expr.expr
+    return (expr as? LuaTableExpr)?.let { getTableTypeName(it) }
 }
 
 val LuaIndexExpr.brack: Boolean get() {
@@ -454,7 +498,7 @@ val LuaIndexExpr.docTy: ITy? get() {
     return if (stub != null)
         stub.docTy
     else
-        assignStat?.comment?.docTy
+        assignStat?.takeIf { it.getIndexFor(this) == 0 }?.comment?.ty
 }
 
 val LuaIndexExpr.prefixExpr: LuaExpr get() {
@@ -476,7 +520,7 @@ val LuaNameExpr.docTy: ITy? get() {
     val stub = stub
     if (stub != null)
         return stub.docTy
-    return assignStat?.comment?.ty
+    return assignStat?.takeIf { it.getIndexFor(this) == 0 }?.comment?.ty
 }
 
 private val KEY_SHOULD_CREATE_STUB = Key.create<CachedValue<Boolean>>("lua.should_create_stub")
