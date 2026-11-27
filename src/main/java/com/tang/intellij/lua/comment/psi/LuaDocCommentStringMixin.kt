@@ -8,6 +8,7 @@ import com.intellij.psi.PsiElement
 import com.intellij.psi.PsiReference
 import com.intellij.psi.PsiReferenceBase
 import com.intellij.psi.impl.source.tree.LeafElement
+import com.tang.intellij.lua.psi.LuaTypeDef
 import com.tang.intellij.lua.psi.search.LuaShortNamesManager
 import com.tang.intellij.lua.search.SearchContext
 
@@ -22,7 +23,7 @@ abstract class LuaDocCommentStringMixin(node: ASTNode) : ASTWrapperPsiElement(no
     }
 
     private companion object {
-        val typeName = Regex("""^\p{javaJavaIdentifierStart}\p{javaJavaIdentifierPart}*+(?:\.\p{javaJavaIdentifierStart}\p{javaJavaIdentifierPart}*+)*+""")
+        val typeName = Regex("""^[A-Za-z_][A-Za-z0-9_]*+(?:\.[A-Za-z_][A-Za-z0-9_]*+)*+""")
     }
 }
 
@@ -34,8 +35,13 @@ private class DescriptionTypeReference(element: LuaDocCommentString, private val
         return LuaShortNamesManager.getInstance(project).findTypeDef(name, SearchContext.get(project))
     }
 
+    override fun isReferenceTo(element: PsiElement): Boolean {
+        return element is LuaTypeDef && element.name == name && super.isReferenceTo(element)
+    }
+
     override fun handleElementRename(newElementName: String): PsiElement {
         val description = element.string?.node as? LeafElement ?: return element
+        if (!description.text.startsWith(name)) return element
         description.replaceWithText(newElementName + description.text.substring(name.length))
         return element
     }
