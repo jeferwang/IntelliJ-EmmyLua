@@ -238,25 +238,17 @@ fun LuaExprList.at(index: Int): LuaExpr? {
 }
 
 fun guessTypeAt(list: LuaExprList, context: SearchContext): ITy {
-    val expr = list.at(context.index)
-    if (expr != null) {
-        //local function getValues12() return 1, 2 end
-        //local function getValues34() return 3, 4 end
-        //local a, b = getValues12() -- a = 1, b = 2
-        //local a, b, c = getValues12(), 3, 4 --a = 1, b = 3, c =  4
-        //local a, b, c = getValues12(), getValue34() --a = 1, b = 3, c =  4
-        var index = context.index
-        val exprList = list.exprStubList
-        if (exprList.size > 1) {
-            val nameSize = context.index + 1
-            index = if (nameSize > exprList.size) {
-                val valueSize = exprList.size
-                nameSize - valueSize
-            } else 0
-        }
-        return context.withIndex(index) { expr.guessType(context) }
+    val exprList = list.exprStubList
+    if (exprList.isEmpty()) return Ty.UNKNOWN
+    val targetIndex = context.index
+    if (targetIndex < 0) return list.guessType(context)
+    if (targetIndex < exprList.size) {
+        return context.withIndex(0) { exprList[targetIndex].guessType(context) }
     }
-    return Ty.UNKNOWN
+    val last = exprList.last()
+    val expandable = last is LuaCallExpr || (last is LuaLiteralExpr && last.kind == LuaLiteralKind.Varargs)
+    if (!expandable) return Ty.UNKNOWN
+    return context.withIndex(targetIndex - exprList.lastIndex) { last.guessType(context) }
 }
 
 fun guessParentType(indexExpr: LuaIndexExpr, context: SearchContext): ITy {
@@ -625,9 +617,19 @@ fun guessReturnType(returnStat: LuaReturnStat?, index: Int, context: SearchConte
                 if (index == 0) return@withIndex docTy
                 val exprs = returnExpr?.exprStubList.orEmpty()
                 if (exprs.size <= 1) return@withIndex docTy
-                return@withIndex TyTuple(exprs.mapIndexed { i, expr ->
-                    if (i == 0) docTy else expr.guessType(context)
-                })
+                val result = mutableListOf(docTy)
+                val lastIndex = exprs.lastIndex
+                for (i in 1..lastIndex) {
+                    val expr = exprs[i]
+                    if (i < lastIndex) {
+                        result.add(context.withIndex(0) { expr.guessType(context) })
+                    } else {
+                        val lastTy = if (expr is LuaParenExpr) context.withIndex(0) { expr.guessType(context) }
+                        else context.withIndex(-1) { expr.guessType(context) }
+                        if (lastTy is TyTuple) result.addAll(lastTy.list) else result.add(lastTy)
+                    }
+                }
+                return@withIndex TyTuple(result)
             }
         }
         if (context.guessTuple()) returnExpr?.guessType(context) ?: Ty.UNKNOWN

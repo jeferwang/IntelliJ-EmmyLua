@@ -59,13 +59,11 @@ class TyUnion : Ty(TyKind.Union) {
     }
 
     override fun equals(other: Any?): Boolean {
-        return other is TyUnion && other.hashCode() == hashCode()
+        return other is TyUnion && childSet == other.childSet
     }
 
     override fun hashCode(): Int {
-        var code = 0
-        childSet.forEach { code = code * 31 + it.hashCode() }
-        return code
+        return childSet.hashCode()
     }
 
     companion object {
@@ -114,19 +112,15 @@ class TyUnion : Ty(TyKind.Union) {
         }
 
         fun union(t1: ITy, t2: ITy): ITy {
-            return when {
-                isInvalid(t1) -> t2
-                isInvalid(t2) -> t1
-                t1 is TyUnion -> t1.append(t2)
-                t2 is TyUnion -> t2.append(t1)
-                else -> {
-                    val u = TyUnion()
-                    u.addChild(t1)
-                    u.addChild(t2)
-                    //if t1 == t2
-                    if (u.childSet.size == 1) t1 else u
-                }
-            }
+            if (isInvalid(t1)) return t2
+            if (isInvalid(t2)) return t1
+            if (t1 == t2) return t1
+            if (t1 is TyUnion && t2 !is TyUnion && t2 in t1.childSet) return t1
+            if (t2 is TyUnion && t1 !is TyUnion && t1 in t2.childSet) return t2
+            val u = TyUnion()
+            u.append(t1)
+            u.append(t2)
+            return if (u.childSet.size == 1) u.childSet.first() else u
         }
 
         fun getPerfectClass(ty: ITy): ITyClass? {

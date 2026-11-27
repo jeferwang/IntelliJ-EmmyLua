@@ -307,11 +307,33 @@ private fun resolveParamType(paramNameDef: LuaParamNameDef, context: SearchConte
      */
     if (paramOwner is LuaClosureExpr) {
         var ret: ITy = Ty.UNKNOWN
+        val paramIndex = paramOwner.getIndexFor(paramNameDef)
         val shouldBe = paramOwner.shouldBe(context)
         shouldBe.each {
             if (it is ITyFunction) {
-                val paramIndex = paramOwner.getIndexFor(paramNameDef)
-                ret = ret.union(it.mainSignature.getParamTy(paramIndex))
+                val ownerSelf = (it as? TyPsiFunction)?.psi?.let { fn ->
+                    (fn as? LuaClassMethod)?.guessClassType(context)
+                }
+                it.process { sig ->
+                    val paramTy = if (sig.colonCall) {
+                        if (paramIndex == 0) {
+                            ownerSelf ?: (paramOwner.parent as? LuaTableField)?.let { tf ->
+                                (tf.parent as? LuaTableExpr)?.shouldBe(context)?.let { tblTy ->
+                                    TyUnion.getPerfectClass(tblTy)?.takeUnless { c -> c.isAnonymous || c.isGlobal }
+                                }
+                            } ?: Ty.UNKNOWN
+                        } else if (paramIndex - 1 < sig.params.size) {
+                            sig.getParamTy(paramIndex - 1)
+                        } else {
+                            sig.varargTy ?: Ty.UNKNOWN
+                        }
+                    } else {
+                        if (paramIndex < sig.params.size) sig.getParamTy(paramIndex)
+                        else sig.varargTy ?: Ty.UNKNOWN
+                    }
+                    ret = ret.union(paramTy)
+                    true
+                }
             }
         }
         return ret

@@ -465,4 +465,67 @@ class TableFieldNavigationTest : LuaTestBase() {
 
         assertEquals(onlyA, file.findReferenceAt(file.text.indexOf("onlyA = \"ok\""))?.resolve())
     }
+
+    fun testTableCallbackClosuresAndTupleAdjustment() {
+        val declarations = myFixture.addFileToProject("Callbacks.lua", """
+            ---@class LoadoutSnapshotSlot
+            ---@field itemId number
+            local LoadoutSnapshotSlot = {}
+
+            ---@class Handler
+            ---@field tag string
+            ---@field clone fun(): self
+            ---@field onTick fun(self: self, slot: LoadoutSnapshotSlot)
+            Handler = {}
+
+            ---@param slot LoadoutSnapshotSlot
+            ---@return LoadoutSnapshotSlot
+            function Handler:handle(slot) end
+        """.trimIndent())
+        val file = myFixture.configureByText("CallbackUsage.lua", """
+            ---@type Handler
+            local h = {
+                clone = function()
+                    return { tag = "x" }
+                end,
+                onTick = function(self, slot)
+                    local t = self.tag
+                    local id = slot.itemId
+                end,
+                handle = function(self, slot)
+                    local t = self.tag
+                    local id = slot.itemId
+                    return { itemId = id }
+                end,
+            }
+
+            ---@param cb fun(vararg LoadoutSnapshotSlot)
+            local function forEach(cb) end
+            forEach(function(a, b)
+                local x = a.itemId
+                local y = b.itemId
+            end)
+
+            ---@return number, LoadoutSnapshotSlot
+            local function pair() end
+            local function wrapped() return true, pair() end
+            local ok, n, slot = wrapped()
+            local fromWrapped = slot.itemId
+
+            local first, extra = { itemId = 1 }
+            extra = { itemId = 2 }
+        """.trimIndent())
+        val itemIdDecl = declarations.findElementAt(declarations.text.indexOf("itemId number"))!!.parent
+        val tagDecl = declarations.findElementAt(declarations.text.indexOf("tag string"))!!.parent
+
+        assertEquals(tagDecl, file.findReferenceAt(file.text.indexOf("tag = \"x\""))?.resolve())
+        assertEquals(tagDecl, file.findReferenceAt(file.text.indexOf("self.tag") + 5)?.resolve())
+        assertEquals(tagDecl, file.findReferenceAt(file.text.lastIndexOf("self.tag") + 5)?.resolve())
+        assertEquals(itemIdDecl, file.findReferenceAt(file.text.indexOf("slot.itemId") + 5)?.resolve())
+        assertEquals(itemIdDecl, file.findReferenceAt(file.text.indexOf("return { itemId = id }") + "return { ".length)?.resolve())
+        assertEquals(itemIdDecl, file.findReferenceAt(file.text.indexOf("a.itemId") + 2)?.resolve())
+        assertEquals(itemIdDecl, file.findReferenceAt(file.text.indexOf("b.itemId") + 2)?.resolve())
+        assertEquals(itemIdDecl, file.findReferenceAt(file.text.indexOf("fromWrapped = slot.itemId") + "fromWrapped = slot.".length)?.resolve())
+        assertNull(file.findReferenceAt(file.text.indexOf("itemId = 2"))?.resolve())
+    }
 }

@@ -133,7 +133,10 @@ private fun LuaExpr.shouldBeInternal(context: SearchContext): ITy {
         if (fieldName != null) {
             tyTbl.eachTopClass(Processor { cls ->
                 if (!(cls is TyTable && cls.table == tbl)) {
-                    cls.findMemberType(fieldName, context)?.let { fieldType = fieldType.union(it) }
+                    cls.findMemberType(fieldName, context)?.let {
+                        val solved = it.substitute(TySelfSubstitutor(project, null, cls))
+                        fieldType = fieldType.union(solved)
+                    }
                 }
                 true
             })
@@ -410,13 +413,25 @@ fun LuaExprList.getExprAt(idx: Int): LuaExpr? {
 
 fun LuaExprList.guessType(context: SearchContext):ITy {
     val exprList = exprStubList
-    return if (exprList.size == 1)
-        exprList.first().guessType(context)
-    else {
-        val list = mutableListOf<ITy>()
-        exprList.forEach { list.add(it.guessType(context)) }
-        TyTuple(list)
+    if (exprList.isEmpty()) return Ty.UNKNOWN
+    if (exprList.size == 1) {
+        val only = exprList.first()
+        return if (only is LuaParenExpr) context.withIndex(0) { only.guessType(context) }
+        else only.guessType(context)
     }
+    val list = mutableListOf<ITy>()
+    val lastIndex = exprList.lastIndex
+    for (i in exprList.indices) {
+        val expr = exprList[i]
+        if (i < lastIndex) {
+            list.add(context.withIndex(0) { expr.guessType(context) })
+        } else {
+            val lastTy = if (expr is LuaParenExpr) context.withIndex(0) { expr.guessType(context) }
+            else context.withIndex(-1) { expr.guessType(context) }
+            if (lastTy is TyTuple) list.addAll(lastTy.list) else list.add(lastTy)
+        }
+    }
+    return TyTuple(list)
 }
 
 fun LuaParametersOwner.getIndexFor(paramNameDef: LuaParamNameDef): Int {

@@ -178,6 +178,23 @@ class FunSignature(colonCall: Boolean,
                    tyParameters: Array<TyParameter> = emptyArray()
 ) : FunSignatureBase(colonCall, params, tyParameters) {
 
+    override fun equals(other: Any?): Boolean {
+        if (this === other) return true
+        if (other !is FunSignature) return false
+        return colonCall == other.colonCall &&
+                returnTy == other.returnTy &&
+                varargTy == other.varargTy &&
+                super.equals(other)
+    }
+
+    override fun hashCode(): Int {
+        var code = super.hashCode()
+        code = 31 * code + colonCall.hashCode()
+        code = 31 * code + returnTy.hashCode()
+        code = 31 * code + (varargTy?.hashCode() ?: 0)
+        return code
+    }
+
     companion object {
         private fun initParams(func: LuaDocFunctionTy): Array<LuaParamInfo> {
             val list = mutableListOf<LuaParamInfo>()
@@ -270,7 +287,9 @@ abstract class TyFunction : Ty(TyKind.Function), ITyFunction {
         if (other is ITyFunction) {
             if (mainSignature != other.mainSignature)
                 return false
-           return signatures.indices.none { signatures[it] != other.signatures.getOrNull(it) }
+            if (signatures.size != other.signatures.size)
+                return false
+            return signatures.indices.none { signatures[it] != other.signatures.getOrNull(it) }
         }
         return false
     }
@@ -315,6 +334,18 @@ class TyPsiFunction(private val colonCall: Boolean, val psi: LuaFuncBodyOwner, f
         if (colonCall) {
             this.flags = this.flags or TyFlags.SELF_FUNCTION
         }
+    }
+
+    override fun equals(other: Any?): Boolean {
+        if (this === other) return true
+        return other is TyPsiFunction && psi == other.psi && colonCall == other.colonCall && flags == other.flags
+    }
+
+    override fun hashCode(): Int {
+        var code = psi.hashCode()
+        code = 31 * code + colonCall.hashCode()
+        code = 31 * code + flags
+        return code
     }
 
     override val mainSignature: IFunSignature by lazy {
