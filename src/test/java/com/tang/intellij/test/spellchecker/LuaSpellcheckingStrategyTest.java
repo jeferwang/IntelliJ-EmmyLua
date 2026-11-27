@@ -1,54 +1,184 @@
 package com.tang.intellij.test.spellchecker;
 
+import com.intellij.core.CoreApplicationEnvironment;
+import com.intellij.lang.ASTNode;
+import com.intellij.openapi.Disposable;
+import com.intellij.openapi.application.ApplicationManager;
+import com.intellij.openapi.util.Disposer;
+import com.intellij.openapi.util.TextRange;
+import com.intellij.psi.PsiComment;
+import com.intellij.psi.PsiElement;
+import com.intellij.psi.PsiNameIdentifierOwner;
+import com.intellij.spellchecker.inspections.Splitter;
+import com.intellij.spellchecker.tokenizer.TokenConsumer;
+import com.intellij.spellchecker.tokenizer.Tokenizer;
+import com.tang.intellij.lua.lang.LuaLanguage;
+import com.tang.intellij.lua.psi.LuaLiteralExpr;
+import com.tang.intellij.lua.psi.LuaTypes;
+import com.tang.intellij.lua.spellchecker.LuaSpellcheckingStrategy;
 import junit.framework.TestCase;
 import kotlin.NotImplementedError;
-import kotlin.Unit;
-import kotlin.jvm.functions.Function0;
 
 import java.io.InputStream;
-import java.lang.reflect.InvocationTargetException;
-import java.lang.reflect.Method;
+import java.lang.reflect.Proxy;
 import java.util.concurrent.CancellationException;
 
 public class LuaSpellcheckingStrategyTest extends TestCase {
     private static final String DICTIONARY =
             "com.jetbrains.rider.spellChecker.layers.BackendEditableDictionaryLayer";
 
+    private final LuaSpellcheckingStrategy strategy = new LuaSpellcheckingStrategy();
+    private Disposable appDisposable;
+
+    @Override
+    protected void setUp() throws Exception {
+        super.setUp();
+        if (ApplicationManager.getApplication() == null) {
+            appDisposable = Disposer.newDisposable();
+            new CoreApplicationEnvironment(appDisposable);
+        }
+    }
+
+    @Override
+    protected void tearDown() throws Exception {
+        try {
+            if (appDisposable != null) {
+                Disposer.dispose(appDisposable);
+                appDisposable = null;
+            }
+        } finally {
+            super.tearDown();
+        }
+    }
+
     public void testSuccessfulCheckRunsOnce() throws Throwable {
-        int[] calls = {0};
-        check(() -> { calls[0]++; return Unit.INSTANCE; });
-        assertEquals(1, calls[0]);
+        for (PsiElement element : sampleElements()) {
+            int[] calls = {0};
+            tokenize(element, () -> calls[0]++);
+            assertEquals(1, calls[0]);
+        }
     }
 
-    public void testKnownDictionaryErrorIsSkipped() throws Throwable {
-        checkError(fromLookup(new NotImplementedError("Not yet implemented")));
+    public void testKnownDictionaryErrorIsSkippedAcrossAllTokenizers() throws Throwable {
+        for (PsiElement element : sampleElements()) {
+            tokenizeWithError(element, fromLookup(new NotImplementedError("Not yet implemented")));
+        }
     }
 
-    public void testDictionaryErrorFromAnotherClassLoaderIsSkipped() throws Throwable {
-        Error error = foreignNotImplementedError();
-        assertFalse(error instanceof NotImplementedError);
-        assertNotSame(NotImplementedError.class.getClassLoader(), error.getClass().getClassLoader());
-        checkError(fromLookup(error));
+    public void testDictionaryErrorFromAnotherClassLoaderIsSkippedAcrossAllTokenizers() throws Throwable {
+        for (PsiElement element : sampleElements()) {
+            Error error = foreignNotImplementedError();
+            assertFalse(error instanceof NotImplementedError);
+            assertNotSame(NotImplementedError.class.getClassLoader(), error.getClass().getClassLoader());
+            tokenizeWithError(element, fromLookup(error));
+        }
     }
 
     public void testUnrelatedNotImplementedErrorsPropagate() throws Throwable {
-        assertPropagates(new NotImplementedError("Unrelated TODO"));
-        assertPropagates(foreignNotImplementedError());
-        Error wrongMethod = new NotImplementedError("Unrelated method");
-        wrongMethod.setStackTrace(new StackTraceElement[]{
-                new StackTraceElement(DICTIONARY, "getWords", "RiderDictionaryLayersProvider.kt", 50)
-        });
-        assertPropagates(wrongMethod);
-        Error emptyTrace = new NotImplementedError("No origin");
-        emptyTrace.setStackTrace(new StackTraceElement[0]);
-        assertPropagates(emptyTrace);
+        for (PsiElement element : sampleElements()) {
+            assertPropagates(element, new NotImplementedError("Unrelated TODO"));
+            assertPropagates(element, foreignNotImplementedError());
+            Error wrongMethod = new NotImplementedError("Unrelated method");
+            wrongMethod.setStackTrace(new StackTraceElement[]{
+                    new StackTraceElement(DICTIONARY, "getWords", "RiderDictionaryLayersProvider.kt", 50)
+            });
+            assertPropagates(element, wrongMethod);
+            Error emptyTrace = new NotImplementedError("No origin");
+            emptyTrace.setStackTrace(new StackTraceElement[0]);
+            assertPropagates(element, emptyTrace);
+        }
     }
 
     public void testOtherErrorsAndCancellationPropagate() throws Throwable {
-        assertPropagates(fromLookup(new AssertionError("Dictionary assertion")));
-        assertPropagates(fromLookup(new LinkageError("Linkage failure")));
-        assertPropagates(fromLookup(new IllegalStateException("Runtime failure")));
-        assertPropagates(fromLookup(new CancellationException("Canceled")));
+        for (PsiElement element : sampleElements()) {
+            assertPropagates(element, fromLookup(new AssertionError("Dictionary assertion")));
+            assertPropagates(element, fromLookup(new LinkageError("Linkage failure")));
+            assertPropagates(element, fromLookup(new IllegalStateException("Runtime failure")));
+            assertPropagates(element, fromLookup(new CancellationException("Canceled")));
+        }
+    }
+
+    private static PsiElement[] sampleElements() {
+        return new PsiElement[]{
+                fakeComment(),
+                fakeIdentifierOwner(),
+                fakeStringLiteral()
+        };
+    }
+
+    private static PsiComment fakeComment() {
+        return (PsiComment) Proxy.newProxyInstance(
+                LuaSpellcheckingStrategyTest.class.getClassLoader(),
+                new Class<?>[]{PsiComment.class},
+                (proxy, method, args) -> switch (method.getName()) {
+                    case "getLanguage" -> LuaLanguage.INSTANCE;
+                    case "getText" -> "-- lua comment";
+                    case "getTextOffset" -> 1;
+                    case "getTextRange" -> TextRange.create(1, 15);
+                    case "getParent" -> null;
+                    default -> defaultValue(method.getReturnType());
+                }
+        );
+    }
+
+    private static PsiNameIdentifierOwner fakeIdentifierOwner() {
+        PsiElement id = (PsiElement) Proxy.newProxyInstance(
+                LuaSpellcheckingStrategyTest.class.getClassLoader(),
+                new Class<?>[]{PsiElement.class},
+                (proxy, method, args) -> switch (method.getName()) {
+                    case "getText" -> "sampleName";
+                    case "getTextRange" -> TextRange.create(6, 16);
+                    default -> defaultValue(method.getReturnType());
+                }
+        );
+        return (PsiNameIdentifierOwner) Proxy.newProxyInstance(
+                LuaSpellcheckingStrategyTest.class.getClassLoader(),
+                new Class<?>[]{PsiNameIdentifierOwner.class},
+                (proxy, method, args) -> switch (method.getName()) {
+                    case "getNameIdentifier" -> id;
+                    case "getText" -> "local sampleName";
+                    case "getTextRange" -> TextRange.create(0, 16);
+                    default -> defaultValue(method.getReturnType());
+                }
+        );
+    }
+
+    private static LuaLiteralExpr fakeStringLiteral() {
+        ASTNode stringLeaf = (ASTNode) Proxy.newProxyInstance(
+                LuaSpellcheckingStrategyTest.class.getClassLoader(),
+                new Class<?>[]{ASTNode.class},
+                (proxy, method, args) -> switch (method.getName()) {
+                    case "getElementType" -> LuaTypes.STRING;
+                    default -> defaultValue(method.getReturnType());
+                }
+        );
+        ASTNode literalNode = (ASTNode) Proxy.newProxyInstance(
+                LuaSpellcheckingStrategyTest.class.getClassLoader(),
+                new Class<?>[]{ASTNode.class},
+                (proxy, method, args) -> switch (method.getName()) {
+                    case "getFirstChildNode" -> stringLeaf;
+                    default -> defaultValue(method.getReturnType());
+                }
+        );
+        return (LuaLiteralExpr) Proxy.newProxyInstance(
+                LuaSpellcheckingStrategyTest.class.getClassLoader(),
+                new Class<?>[]{LuaLiteralExpr.class},
+                (proxy, method, args) -> switch (method.getName()) {
+                    case "getStub" -> null;
+                    case "getNode" -> literalNode;
+                    case "getText" -> "\"sample\"";
+                    case "getTextRange" -> TextRange.create(0, 8);
+                    default -> defaultValue(method.getReturnType());
+                }
+        );
+    }
+
+    private static Object defaultValue(Class<?> returnType) {
+        if (!returnType.isPrimitive()) return null;
+        if (returnType == boolean.class) return false;
+        if (returnType == int.class) return 0;
+        if (returnType == long.class) return 0L;
+        return 0;
     }
 
     private static <T extends Throwable> T fromLookup(T error) {
@@ -81,9 +211,9 @@ public class LuaSpellcheckingStrategyTest extends TestCase {
                 .getConstructor(String.class).newInstance("Not yet implemented");
     }
 
-    private static void assertPropagates(Throwable expected) throws Throwable {
+    private void assertPropagates(PsiElement element, Throwable expected) {
         try {
-            checkError(expected);
+            tokenizeWithError(element, expected);
         } catch (Throwable actual) {
             assertSame(expected, actual);
             return;
@@ -91,21 +221,21 @@ public class LuaSpellcheckingStrategyTest extends TestCase {
         fail("Expected the original error to propagate: " + expected);
     }
 
-    private static void checkError(Throwable error) throws Throwable {
-        check(() -> {
+    private void tokenizeWithError(PsiElement element, Throwable error) {
+        tokenize(element, () -> {
             if (error instanceof Error) throw (Error) error;
             throw (RuntimeException) error;
         });
     }
 
-    private static void check(Function0<Unit> action) throws Throwable {
-        Method fallback = Class.forName("com.tang.intellij.lua.spellchecker.LuaSpellcheckingStrategyKt")
-                .getDeclaredMethod("withRiderDictionaryFallback", Function0.class);
-        fallback.setAccessible(true);
-        try {
-            fallback.invoke(null, action);
-        } catch (InvocationTargetException error) {
-            throw error.getCause();
-        }
+    @SuppressWarnings({"rawtypes", "unchecked"})
+    private void tokenize(PsiElement element, Runnable onConsume) {
+        Tokenizer tokenizer = strategy.getTokenizer(element);
+        tokenizer.tokenize(element, new TokenConsumer() {
+            @Override
+            public void consumeToken(PsiElement target, String text, boolean useRename, int offset, TextRange rangeToCheck, Splitter splitter) {
+                onConsume.run();
+            }
+        });
     }
 }

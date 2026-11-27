@@ -16,6 +16,7 @@
 
 package com.tang.intellij.lua.spellchecker
 
+import com.intellij.openapi.util.TextRange
 import com.intellij.psi.PsiElement
 import com.intellij.psi.PsiNameIdentifierOwner
 import com.intellij.spellchecker.inspections.PlainTextSplitter
@@ -26,6 +27,8 @@ import com.tang.intellij.lua.psi.LuaLiteralKind
 import com.tang.intellij.lua.psi.kind
 
 class LuaSpellcheckingStrategy : SpellcheckingStrategy() {
+    private val safeCommentTokenizer: Tokenizer<*> = RiderFallbackTokenizer(myCommentTokenizer)
+
     override fun isMyContext(element: PsiElement): Boolean {
         return element.language is LuaLanguage
     }
@@ -34,7 +37,16 @@ class LuaSpellcheckingStrategy : SpellcheckingStrategy() {
         return when (element) {
             is LuaLiteralExpr -> StringLiteralTokenizer
             is PsiNameIdentifierOwner -> IdentifierOwnerTokenizer
-            else -> super.getTokenizer(element)
+            else -> wrapWithRiderDictionaryFallback(super.getTokenizer(element))
+        }
+    }
+
+    private fun <T : PsiElement> wrapWithRiderDictionaryFallback(tokenizer: Tokenizer<T>): Tokenizer<*> {
+        return when (tokenizer) {
+            EMPTY_TOKENIZER -> tokenizer
+            myCommentTokenizer -> safeCommentTokenizer
+            TEXT_TOKENIZER -> SafeTextTokenizer
+            else -> RiderFallbackTokenizer(tokenizer)
         }
     }
 }
@@ -56,6 +68,18 @@ private object StringLiteralTokenizer : EscapeSequenceTokenizer<LuaLiteralExpr>(
                 consumer.consumeToken(element, PlainTextSplitter.getInstance())
             }
         }
+    }
+}
+
+private val SafeTextTokenizer: Tokenizer<PsiElement> = RiderFallbackTokenizer(SpellcheckingStrategy.TEXT_TOKENIZER)
+
+private class RiderFallbackTokenizer<T : PsiElement>(private val delegate: Tokenizer<T>) : Tokenizer<T>() {
+    override fun tokenize(element: T, consumer: TokenConsumer) {
+        withRiderDictionaryFallback { delegate.tokenize(element, consumer) }
+    }
+
+    override fun getHighlightingRange(element: PsiElement, offset: Int, range: TextRange): TextRange {
+        return delegate.getHighlightingRange(element, offset, range)
     }
 }
 
