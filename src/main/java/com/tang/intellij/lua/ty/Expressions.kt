@@ -178,7 +178,7 @@ private fun LuaCallExpr.infer(context: SearchContext): ITy {
     }
 
     var ret: ITy = Ty.UNKNOWN
-    val ty = infer(expr, context)//expr.guessType(context)
+    val ty = TyAliasSubstitutor.substitute(infer(expr, context), context)
     TyUnion.each(ty) {
         when (it) {
             is ITyFunction -> {
@@ -318,14 +318,16 @@ private fun LuaIndexExpr.infer(context: SearchContext): ITy {
             var ty: ITy = Ty.UNKNOWN
 
             // Type[]
-            TyUnion.each(tySet) {
-                if (it is ITyArray) ty = ty.union(it.base)
+            if (indexExpr.idExpr == null) {
+                TyUnion.each(tySet) {
+                    if (it is ITyArray) ty = ty.union(it.base)
+                }
             }
             if (ty !is TyUnknown) return@Computable ty
 
             // table<number, Type>
             TyUnion.each(tySet) {
-                if (it is ITyGeneric) ty = ty.union(it.getParamTy(1))
+                if (it is ITyGeneric && it.isTableGeneric()) ty = ty.union(it.getParamTy(1))
             }
             if (ty !is TyUnknown) return@Computable ty
 
@@ -358,7 +360,7 @@ private fun LuaIndexExpr.infer(context: SearchContext): ITy {
             
             // table<string, K> -> member type is K
             prefixType.each { ty ->
-                if (ty is ITyGeneric && ty.getParamTy(0) == Ty.STRING)
+                if (ty is ITyGeneric && ty.isTableGeneric() && acceptsStringKey(ty.getParamTy(0), propName))
                     result = result.union(ty.getParamTy(1))
             }
         }
@@ -386,7 +388,9 @@ private fun guessFieldType(fieldName: String, type: ITyClass, context: SearchCon
 fun LuaTableExpr.infer(): ITy {
     val list = this.tableFieldList
     if (list.size == 1) {
-        val valueExpr = list.first().valueExpr
+        val field = list.first()
+        if (field.id != null || field.lbrack != null) return TyTable(this)
+        val valueExpr = field.valueExpr
         if (valueExpr is LuaLiteralExpr && valueExpr.kind == LuaLiteralKind.Varargs) {
             val func = PsiTreeUtil.getStubOrPsiParentOfType(this, LuaFuncBodyOwner::class.java)
             val ty = func?.varargType

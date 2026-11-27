@@ -3,13 +3,13 @@ package com.tang.intellij.test
 import com.tang.intellij.lua.comment.psi.LuaDocTagField
 
 class TableFieldNavigationTest : LuaTestBase() {
-    private fun checkReturnFields(source: String) {
+    private fun checkSlotFields(source: String) {
         val declarations = myFixture.addFileToProject("Slots.lua", """
             ---@class LoadoutSnapshotSlot
             ---@field itemId number
             LoadoutSnapshotSlot = {}
         """.trimIndent())
-        val file = myFixture.configureByText("Returns.lua", source.trimIndent())
+        val file = myFixture.configureByText("Usage.lua", source.trimIndent())
         val offsets = Regex("\\bitemId\\b").findAll(file.text).map { it.range.first }.toList()
         assertTrue(offsets.isNotEmpty())
         for (offset in offsets) {
@@ -19,7 +19,7 @@ class TableFieldNavigationTest : LuaTestBase() {
         }
     }
 
-    fun testStatementReturnAnnotationsAndCaller() = checkReturnFields("""
+    fun testStatementReturnAnnotationsAndCaller() = checkSlotFields("""
         local function make()
             ---@type LoadoutSnapshotSlot
             return { itemId = 1 }
@@ -30,7 +30,7 @@ class TableFieldNavigationTest : LuaTestBase() {
         return { itemId = 1 }
     """)
 
-    fun testDeclaredReturnSlotsAndSelf() = checkReturnFields("""
+    fun testDeclaredReturnSlotsAndSelf() = checkSlotFields("""
         ---@return LoadoutSnapshotSlot
         local function make() return { itemId = 1 } end
         ---@return boolean, LoadoutSnapshotSlot
@@ -41,12 +41,61 @@ class TableFieldNavigationTest : LuaTestBase() {
         function LoadoutSnapshotSlot:copy() return { itemId = 1 } end
     """)
 
-    fun testContextualClosureReturns() = checkReturnFields("""
+    fun testContextualClosureReturns() = checkSlotFields("""
         ---@type fun(): LoadoutSnapshotSlot
         local make = function() return { itemId = 1 } end
         ---@param cb fun(): LoadoutSnapshotSlot
         local function consume(cb) end
         consume(function() return { itemId = 1 } end)
+    """)
+
+    fun testArrayAndNestedContainerFields() = checkSlotFields("""
+        ---@type LoadoutSnapshotSlot[]
+        local list = { { itemId = 1 }, { itemId = 2 } }
+        ---@return LoadoutSnapshotSlot[]
+        local function make() return { { itemId = 3 } } end
+        ---@class Container
+        ---@field slots LoadoutSnapshotSlot[]
+        local Container = {}
+        ---@type Container
+        local box = { slots = { { itemId = 4 } } }
+    """)
+
+    fun testMapFieldsAndAssignments() = checkSlotFields("""
+        local k = "dynamic"
+        ---@type table<string, LoadoutSnapshotSlot>
+        local map = { primary = { itemId = 1 }, ["secondary"] = { itemId = 2 }, [k] = { itemId = 3 } }
+        map.primary = { itemId = 4 }
+        ---@type table<any, LoadoutSnapshotSlot>
+        local anyKey = {}
+        anyKey.primary = { itemId = 5 }
+        ---@type table<"a"|"b", LoadoutSnapshotSlot>
+        local limited = {}
+        local id = limited.a.itemId
+    """)
+
+    fun testFieldAnnotationsAndDocTableFields() = checkSlotFields("""
+        local arr = { ---@type LoadoutSnapshotSlot
+            { itemId = 1 } }
+        local cfg = { ---@type LoadoutSnapshotSlot
+            slot = { itemId = 2 } }
+        local indexed = { ---@type LoadoutSnapshotSlot
+            [1] = { itemId = 3 } }
+        ---@type { inner: LoadoutSnapshotSlot }
+        local box = { inner = { itemId = 4 } }
+    """)
+
+    fun testAliasedFunctionAndArrayElements() = checkSlotFields("""
+        ---@alias SlotAlias LoadoutSnapshotSlot
+        ---@alias SlotList SlotAlias[]
+        ---@alias SlotFn fun(a: SlotAlias, b: SlotAlias): SlotAlias
+        ---@type SlotFn
+        local fn
+        local result = fn({ itemId = 1 }, { itemId = 2 })
+        local id = result.itemId
+        ---@type SlotList
+        local list = {}
+        list[1] = { itemId = 3 }
     """)
 
     fun testUnannotatedClosureReturnKeyRemainsADeclaration() {

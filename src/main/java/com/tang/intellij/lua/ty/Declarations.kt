@@ -21,6 +21,7 @@ import com.intellij.openapi.util.Computable
 import com.intellij.psi.util.PsiTreeUtil
 import com.tang.intellij.lua.Constants
 import com.tang.intellij.lua.comment.LuaCommentUtil
+import com.tang.intellij.lua.comment.psi.LuaDocTableField
 import com.tang.intellij.lua.comment.psi.LuaDocTagField
 import com.tang.intellij.lua.comment.psi.LuaDocTagReturn
 import com.tang.intellij.lua.ext.recursionGuard
@@ -43,6 +44,7 @@ internal fun inferInner(element: LuaTypeGuessable, context: SearchContext): ITy 
         is LuaParamNameDef -> element.infer(context)
         is LuaNameDef -> element.infer(context)
         is LuaDocTagField -> element.infer()
+        is LuaDocTableField -> element.stub?.docTy ?: element.ty?.getType() ?: Ty.UNKNOWN
         is LuaTableField -> element.infer(context)
         is LuaPsiFile -> inferFile(element, context)
         else -> Ty.UNKNOWN
@@ -170,7 +172,7 @@ private fun LuaFuncBodyOwner.infer(context: SearchContext): ITy {
 private fun LuaTableField.infer(context: SearchContext): ITy {
     val stub = stub
     //from comment
-    val docTy = if (stub != null) stub.docTy else comment?.docTy
+    val docTy = if (stub != null) stub.docTy else comment?.ty
     if (docTy != null)
         return docTy
 

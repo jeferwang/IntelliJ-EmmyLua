@@ -59,6 +59,15 @@ interface ITyGeneric : ITy {
     }
 }
 
+internal fun ITyGeneric.isTableGeneric(): Boolean = base == Ty.TABLE && params.size >= 2
+
+internal fun acceptsStringKey(keyTy: ITy, keyName: String?): Boolean = when (keyTy) {
+    is TyUnknown -> true
+    is TyStringLiteral -> keyName == null || keyTy.content == keyName
+    is TyUnion -> keyTy.getChildTypes().any { acceptsStringKey(it, keyName) }
+    else -> keyTy == Ty.STRING
+}
+
 abstract class TyGeneric : Ty(TyKind.Generic), ITyGeneric {
 
     override fun equals(other: Any?): Boolean {

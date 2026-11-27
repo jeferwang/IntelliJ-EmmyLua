@@ -91,7 +91,7 @@ private fun LuaExpr.shouldBeInternal(context: SearchContext): ITy {
         val p2 = p1.parent
         if (p2 is LuaCallExpr) {
             val idx = p1.getIndexFor(this)
-            val fTy = infer(p2.expr, context)
+            val fTy = TyAliasSubstitutor.substitute(infer(p2.expr, context), context)
             var ret: ITy = Ty.UNKNOWN
             fTy.each {
                 if (it is ITyFunction) {
@@ -108,17 +108,43 @@ private fun LuaExpr.shouldBeInternal(context: SearchContext): ITy {
             return ret
         }
     } else if (p1 is LuaTableField) {
+        val tbl = p1.parent as? LuaTableExpr ?: return Ty.UNKNOWN
+        val key = p1.idExpr
+        if (this == key) {
+            var keyType: ITy = Ty.UNKNOWN
+            tbl.shouldBe(context).each {
+                if (it is ITyGeneric && it.isTableGeneric()) keyType = keyType.union(it.getParamTy(0))
+            }
+            return keyType
+        }
+        if (this != p1.valueExpr) return Ty.UNKNOWN
+        val fieldDocTy = p1.comment?.ty
+        if (fieldDocTy != null && !Ty.isInvalid(fieldDocTy)) return fieldDocTy
+
+        val tyTbl = tbl.shouldBe(context)
         val fieldName = p1.name
-        val tbl = p1.parent
-        if (fieldName != null && tbl is LuaTableExpr) {
-            var fieldType: ITy = Ty.UNKNOWN
-            val tyTbl = tbl.shouldBe(context)
+        var fieldType: ITy = Ty.UNKNOWN
+        if (fieldName != null) {
             tyTbl.eachTopClass(Processor { cls ->
-                cls.findMemberType(fieldName, context)?.let { fieldType = fieldType.union(it) }
+                if (!(cls is TyTable && cls.table == tbl)) {
+                    cls.findMemberType(fieldName, context)?.let { fieldType = fieldType.union(it) }
+                }
                 true
             })
-            return fieldType
+            tyTbl.each {
+                if (it is ITyGeneric && it.isTableGeneric() && acceptsStringKey(it.getParamTy(0), fieldName))
+                    fieldType = fieldType.union(it.getParamTy(1))
+            }
+        } else {
+            val keyTy = key?.let { infer(it, context) }
+            tyTbl.each {
+                if (it is ITyArray && keyTy != Ty.STRING && keyTy !is TyStringLiteral)
+                    fieldType = fieldType.union(it.base)
+                if (it is ITyGeneric && it.isTableGeneric())
+                    fieldType = fieldType.union(it.getParamTy(1))
+            }
         }
+        return fieldType
     }
     return Ty.UNKNOWN
 }
@@ -460,7 +486,7 @@ private val KEY_SHOULD_CREATE_STUB = Key.create<CachedValue<Boolean>>("lua.shoul
 // { ["field"] = valueExpr }
 val LuaTableField.valueExpr: LuaExpr? get() {
     val list = PsiTreeUtil.getStubChildrenOfTypeAsList(this, LuaExpr::class.java)
-    return list.lastOrNull()
+    return if (lbrack != null) list.getOrNull(1) else list.firstOrNull()
 }
 
 val LuaTableField.shouldCreateStub: Boolean get() =

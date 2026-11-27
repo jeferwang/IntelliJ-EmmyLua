@@ -471,12 +471,12 @@ fun guessParentType(tableField: LuaTableField, context: SearchContext): ITy {
 fun guessType(tableField: LuaTableField, context: SearchContext): ITy {
     val stub = tableField.stub
     //from comment
-    val docTy = if (stub != null) stub.docTy else tableField.comment?.docTy
+    val docTy = if (stub != null) stub.docTy else tableField.comment?.ty
     if (docTy != null)
         return docTy
 
     //guess from value
-    val valueExpr = PsiTreeUtil.getStubChildOfType(tableField, LuaExpr::class.java)
+    val valueExpr = tableField.valueExpr
     if (valueExpr != null) {
         return valueExpr.guessType(context)
     }

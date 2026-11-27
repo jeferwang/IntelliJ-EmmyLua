@@ -115,7 +115,9 @@ open class TySubstitutor : ITySubstitutor {
 }
 
 class TyAliasSubstitutor private constructor(val project: Project) : ITySubstitutor {
-    private val alreadyProcessed = hashSetOf<String>()
+    private val inProgress = hashSetOf<String>()
+    private val resolved = mutableMapOf<String, ITy>()
+    private var cyclesSeen = 0
 
     companion object {
         fun substitute(ty: ITy, context: SearchContext): ITy {
@@ -130,9 +132,21 @@ class TyAliasSubstitutor private constructor(val project: Project) : ITySubstitu
     }
 
     override fun substitute(clazz: ITyClass): ITy {
-        if (!alreadyProcessed.add(clazz.className))
+        val name = clazz.className
+        resolved[name]?.let { return it }
+        if (!inProgress.add(name)) {
+            cyclesSeen++
             return clazz
-        return clazz.recoverAlias(SearchContext.get(project), this)
+        }
+        val before = cyclesSeen
+        return try {
+            val ty = clazz.recoverAlias(SearchContext.get(project), this)
+            // A cycle yields a path-dependent partial expansion.
+            if (cyclesSeen == before && ty !== clazz) resolved[name] = ty
+            ty
+        } finally {
+            inProgress.remove(name)
+        }
     }
 
     override fun substitute(generic: ITyGeneric): ITy {
