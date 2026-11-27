@@ -117,17 +117,25 @@ private fun guessBinaryOpType(binaryExpr : LuaBinaryExpr, context:SearchContext)
     return context.withIndex(0) { infer(lhs, context) }
 }
 
-fun LuaCallExpr.createSubstitutor(sig: IFunSignature, context: SearchContext, excludeArgIndex: Int = -1): ITySubstitutor? {
+fun LuaCallExpr.createSubstitutor(
+    sig: IFunSignature,
+    context: SearchContext,
+    excludeArgIndex: Int = -1,
+    startArgIndex: Int = 0,
+    colonOverride: Boolean? = null
+): ITySubstitutor? {
     if (sig.isGeneric()) {
         val list = mutableListOf<ITy?>()
+        val isColon = colonOverride ?: this.isMethodColonCall
         // self type
-        if (this.isMethodColonCall) {
+        if (isColon) {
             this.prefixExpr?.let { prefix ->
                 list.add(prefix.guessType(context))
             }
         }
         val args = argList
-        args.forEachIndexed { index, arg ->
+        for (index in startArgIndex until args.size) {
+            val arg = args[index]
             if (index == excludeArgIndex) {
                 list.add(null)
             } else if (index == args.lastIndex && arg.isMultiReturnExpandable()) {
@@ -219,7 +227,7 @@ private fun LuaCallExpr.infer(context: SearchContext): ITy {
                 }
             }
             "rawget" -> if (context.index <= 0 && args.size >= 2) {
-                val rawTy = resolveRawTableFieldType(args[0], args[1], context)
+                val rawTy = resolveRawTableFieldType(args[0], args[1], context, directOnly = true)
                 if (!Ty.isInvalid(rawTy)) return rawTy
             }
             "rawset" -> if (context.index <= 0 && args.isNotEmpty()) {
@@ -236,7 +244,25 @@ private fun LuaCallExpr.infer(context: SearchContext): ITy {
                     }
                 }
                 val elemTy = TyUnion.unionAll(elems)
-                if (!Ty.isInvalid(elemTy)) return elemTy
+                if (!Ty.isInvalid(elemTy)) {
+                    val startBound = args.getOrNull(1)?.let(::constantIntLiteral) ?: 1
+                    val endBound = args.getOrNull(2)?.let(::constantIntLiteral)
+                    if (args.size >= 3 && endBound != null) {
+                        val count = (endBound - startBound + 1).coerceAtLeast(0)
+                        if (context.index >= 0) {
+                            return if (context.index < count) elemTy else Ty.UNKNOWN
+                        }
+                        if (context.guessTuple()) {
+                            return when {
+                                count <= 0 -> Ty.UNKNOWN
+                                count == 1 -> elemTy
+                                count <= 16 -> TyTuple(List(count) { elemTy })
+                                else -> elemTy
+                            }
+                        }
+                    }
+                    return elemTy
+                }
             }
             "select" -> if (args.isNotEmpty()) {
                 var selector: LuaExpr = args[0]
@@ -245,19 +271,23 @@ private fun LuaCallExpr.infer(context: SearchContext): ITy {
                     if (selector.kind == LuaLiteralKind.String && LuaString.decodeOrNull(selector.text) == "#") {
                         return if (context.index <= 0) Ty.NUMBER else Ty.UNKNOWN
                     }
-                    if (selector.kind == LuaLiteralKind.Number) {
-                        val n = selector.text.toIntOrNull()
-                        if (n != null && n >= 1) {
-                            val shifted = args.drop(n)
-                            if (shifted.isEmpty()) return Ty.UNKNOWN
-                            if (context.guessTuple()) return adjustExprList(shifted, context)
-                            val idx = context.index
-                            if (idx < shifted.size) return context.withIndex(0) { shifted[idx].guessType(context) }
-                            val last = shifted.last()
-                            return if (last.isMultiReturnExpandable())
-                                context.withIndex(idx - shifted.lastIndex) { last.guessType(context) }
-                            else Ty.UNKNOWN
+                    val n = constantIntLiteral(selector)
+                    if (n != null && n >= 1) {
+                        val valueArgs = args.drop(1)
+                        if (valueArgs.isEmpty()) return Ty.UNKNOWN
+                        val skip = n - 1
+                        if (context.guessTuple()) {
+                            val full = adjustExprList(valueArgs, context)
+                            return dropTupleSlots(full, skip)
                         }
+                        val target = skip + context.index
+                        if (target < valueArgs.size) {
+                            return context.withIndex(0) { valueArgs[target].guessType(context) }
+                        }
+                        val last = valueArgs.last()
+                        return if (last.isMultiReturnExpandable())
+                            context.withIndex(target - valueArgs.lastIndex) { last.guessType(context) }
+                        else Ty.UNKNOWN
                     }
                 }
             }
@@ -267,19 +297,35 @@ private fun LuaCallExpr.infer(context: SearchContext): ITy {
                     if (context.index == 0) return Ty.BOOLEAN
                     val fnExpr = args[0]
                     val fnTy = TyAliasSubstitutor.substitute(context.withIndex(0) { fnExpr.guessType(context) }, context)
-                    val sigs = selectSignaturesByArity(fnTy, args.size - argOffset, colon = false)
+                    val forwardedCounts = effectiveArgCountsFrom(argOffset, context)
+                    val sigs = selectSignaturesByArity(fnTy, forwardedCounts, colon = false)
                     val selfReceiver = (fnExpr as? LuaIndexExpr)?.prefixExpr?.let {
                         context.withIndex(0) { it.guessType(context) }
                     }
                     val selfSub = TySelfSubstitutor(project, null, selfReceiver)
                     val fnRets = mutableListOf<ITy>()
                     for (sig in sigs) {
-                        val r = sig.returnTy.substitute(selfSub)
+                        val generic = createSubstitutor(sig, context, startArgIndex = argOffset, colonOverride = false)
+                        val r = (generic?.let { sig.returnTy.substitute(it) } ?: sig.returnTy).substitute(selfSub)
                         if (!Ty.isInvalid(r)) fnRets.add(r)
                     }
                     val fnRetTy = TyUnion.unionAll(fnRets)
-                    if (context.index > 0) return extractReturnSlot(fnRetTy, context.index - 1)
-                    if (context.guessTuple()) return prependTupleSlot(Ty.BOOLEAN, fnRetTy)
+                    val handlerRetTy = if (builtin == "xpcall") {
+                        val hTy = TyAliasSubstitutor.substitute(context.withIndex(0) { args[1].guessType(context) }, context)
+                        val hSigs = selectSignaturesByArity(hTy, 1, colon = false)
+                        val hRets = hSigs.map { extractReturnSlot(it.returnTy, 0) }.filter { !Ty.isInvalid(it) }
+                        TyUnion.unionAll(hRets)
+                    } else Ty.UNKNOWN
+                    if (context.index > 0) {
+                        val successSlot = extractReturnSlot(fnRetTy, context.index - 1)
+                        return if (context.index == 1 && !Ty.isInvalid(handlerRetTy)) successSlot.union(handlerRetTy) else successSlot
+                    }
+                    if (context.guessTuple()) {
+                        val successTuple = prependTupleSlot(Ty.BOOLEAN, fnRetTy)
+                        return if (!Ty.isInvalid(handlerRetTy)) {
+                            successTuple.union(TyTuple(listOf(Ty.BOOLEAN, handlerRetTy)))
+                        } else successTuple
+                    }
                 }
             }
         }
@@ -414,6 +460,22 @@ fun LuaLiteralExpr.infer(): ITy {
     }
 }
 
+private fun constantIntLiteral(expr: LuaExpr): Int? {
+    var cur: LuaExpr = expr
+    while (cur is LuaParenExpr) cur = cur.expr ?: return null
+    if (cur is LuaLiteralExpr && cur.kind == LuaLiteralKind.Number) {
+        return cur.text.toIntOrNull()
+    }
+    if (cur is LuaUnaryExpr) {
+        val op = cur.stub?.opType ?: cur.unaryOp.node.firstChildNode.elementType
+        if (op == LuaTypes.MINUS) {
+            val inner = cur.expr?.let(::constantIntLiteral) ?: return null
+            return -inner
+        }
+    }
+    return null
+}
+
 private fun LuaIndexExpr.infer(context: SearchContext): ITy {
     val retTy = recursionGuard(this, Computable {
         val indexExpr = this
@@ -436,8 +498,19 @@ private fun LuaIndexExpr.infer(context: SearchContext): ITy {
                     matched.add(it.getParamTy(1))
                 }
             }
-            val ty = TyUnion.unionAll(matched)
-            if (!Ty.isInvalid(ty)) return@Computable ty
+            if (isStringLiteral && literalKey != null) {
+                if (indexExpr.docTy == null) {
+                    tySet.eachTopClass(Processor { clazz ->
+                        matched.add(guessFieldType(literalKey, clazz, context))
+                        true
+                    })
+                    val ty = TyUnion.unionAll(matched)
+                    if (!Ty.isInvalid(ty)) return@Computable ty
+                }
+            } else {
+                val ty = TyUnion.unionAll(matched)
+                if (!Ty.isInvalid(ty)) return@Computable ty
+            }
 
             parentTy = tySet
         }

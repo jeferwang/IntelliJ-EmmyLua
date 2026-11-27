@@ -53,14 +53,16 @@ class MatchFunctionSignatureInspection : StrictInspection() {
 
                     if (type is TyFunction) {
                         val candidates = o.selectCandidateSignatures(type, searchContext)
-                        val perfectSig = candidates.singleOrNull() ?: type.findPerfectSignature(o)
-                        if (candidates.size <= 1) {
-                            annotateCall(o, perfectSig, searchContext)
+                        val alternatives = collectConcreteArgAlternatives(o, searchContext)
+                        val effectiveCandidates = if (candidates.isNotEmpty()) candidates else listOf(type.findPerfectSignature(o))
+                        if (effectiveCandidates.size == 1 && alternatives.size == 1) {
+                            annotateCall(o, effectiveCandidates.first(), searchContext, alternatives.first())
                         } else {
-                            // Multiple equally-matched overload candidates: only report if no candidate fits.
-                            val concreteTypes = collectConcreteArgs(o, searchContext)
-                            if (candidates.none { matchesSignature(o, it, concreteTypes, searchContext) }) {
-                                annotateCall(o, candidates.first(), searchContext, concreteTypes)
+                            val failing = alternatives.firstOrNull { alt ->
+                                effectiveCandidates.none { matchesSignature(o, it, alt, searchContext) }
+                            }
+                            if (failing != null) {
+                                annotateCall(o, effectiveCandidates.first(), searchContext, failing)
                             }
                         }
                     } else if (prefixExpr is LuaIndexExpr) {
@@ -76,31 +78,40 @@ class MatchFunctionSignatureInspection : StrictInspection() {
                     }
                 }
 
-                private fun collectConcreteArgs(call: LuaCallExpr, searchContext: SearchContext): List<ConcreteTypeInfo> {
+                private fun collectConcreteArgAlternatives(call: LuaCallExpr, searchContext: SearchContext): List<List<ConcreteTypeInfo>> {
                     val concreteParams = call.argList
-                    val concreteTypes = mutableListOf<ConcreteTypeInfo>()
-                    concreteParams.forEachIndexed { index, luaExpr ->
-                        if (index == concreteParams.lastIndex && luaExpr.isMultiReturnExpandable()) {
-                            val ty = searchContext.withIndex(-1) { luaExpr.guessType(searchContext) }
-                            if (ty is TyTuple) {
-                                concreteTypes.addAll(ty.list.map { ConcreteTypeInfo(luaExpr, it) })
-                            } else if (ty is TyUnion && ty.getChildTypes().any { it is TyTuple }) {
-                                var maxLen = 1
-                                TyUnion.each(ty) { arm ->
-                                    if (arm is TyTuple && arm.list.size > maxLen) maxLen = arm.list.size
-                                }
-                                for (slot in 0 until maxLen) {
-                                    concreteTypes.add(ConcreteTypeInfo(luaExpr, extractReturnSlot(ty, slot)))
-                                }
-                            } else {
-                                concreteTypes.add(ConcreteTypeInfo(luaExpr, ty))
-                            }
-                        } else {
-                            val ty = searchContext.withIndex(0) { luaExpr.guessType(searchContext) }
-                            concreteTypes.add(ConcreteTypeInfo(luaExpr, ty))
-                        }
+                    if (concreteParams.isEmpty()) return listOf(emptyList())
+                    val prefix = ArrayList<ConcreteTypeInfo>(concreteParams.size)
+                    for (index in 0 until concreteParams.lastIndex) {
+                        val expr = concreteParams[index]
+                        prefix.add(ConcreteTypeInfo(expr, searchContext.withIndex(0) { expr.guessType(searchContext) }))
                     }
-                    return concreteTypes
+                    val last = concreteParams.last()
+                    if (!last.isMultiReturnExpandable()) {
+                        prefix.add(ConcreteTypeInfo(last, searchContext.withIndex(0) { last.guessType(searchContext) }))
+                        return listOf(prefix)
+                    }
+                    val ty = searchContext.withIndex(-1) { last.guessType(searchContext) }
+                    if (ty is TyUnion && ty.getChildTypes().any { it is TyTuple }) {
+                        val alts = ArrayList<List<ConcreteTypeInfo>>(ty.size)
+                        TyUnion.each(ty) { arm ->
+                            val list = ArrayList<ConcreteTypeInfo>(prefix.size + (if (arm is TyTuple) arm.list.size else 1))
+                            list.addAll(prefix)
+                            if (arm is TyTuple) {
+                                arm.list.forEach { list.add(ConcreteTypeInfo(last, it)) }
+                            } else {
+                                list.add(ConcreteTypeInfo(last, arm))
+                            }
+                            alts.add(list)
+                        }
+                        return alts
+                    }
+                    if (ty is TyTuple) {
+                        ty.list.forEach { prefix.add(ConcreteTypeInfo(last, it)) }
+                    } else {
+                        prefix.add(ConcreteTypeInfo(last, ty))
+                    }
+                    return listOf(prefix)
                 }
 
                 private fun matchesSignature(
@@ -127,7 +138,7 @@ class MatchFunctionSignatureInspection : StrictInspection() {
                     call: LuaCallExpr,
                     signature: IFunSignature,
                     searchContext: SearchContext,
-                    concreteTypes: List<ConcreteTypeInfo> = collectConcreteArgs(call, searchContext)
+                    concreteTypes: List<ConcreteTypeInfo>
                 ) {
                     var nArgs = 0
                     signature.processArgs(call) { i, pi ->

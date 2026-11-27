@@ -846,4 +846,93 @@ class TableFieldNavigationTest : LuaTestBase() {
         assertNull(file.findReferenceAt(file.text.indexOf("truncated.onlyB") + 10)?.resolve())
         assertEquals(itemIdDecl, file.findReferenceAt(file.text.indexOf("g.itemId") + 2)?.resolve())
     }
+
+    fun testAmbiguousNamedVsAnonymousBracketReadAndStdlibEdgeCases() {
+        val declarations = myFixture.addFileToProject("M13Decls.lua", """
+            ---@class SlotA
+            ---@field itemId number
+            SlotA = {}
+            SlotA.__index = SlotA
+
+            ---@class SlotB
+            ---@field bagId string
+            local SlotB = {}
+
+            ---@class HolderB
+            ---@field key SlotB
+            local HolderB = {}
+
+            ---@class ErrInfo
+            ---@field code number
+            local ErrInfo = {}
+        """.trimIndent())
+        val file = myFixture.configureByText("M13Usage.lua", """
+            local function pickUnion(flag)
+                if flag then
+                    ---@type SlotA
+                    local a
+                    return a
+                else
+                    return { itemId = 1 }
+                end
+            end
+            local ambig = pickUnion(true)
+            local vAmbig = ambig["itemId"]
+
+            ---@type table<string, SlotA> | HolderB
+            local mapOrClass
+            local bothVal = mapOrClass["key"]
+            local fromMapArm = bothVal.itemId
+            local fromClassArm = bothVal.bagId
+
+            ---@return number, SlotA
+            local function pair() end
+            local selected = select(2, pair())
+            local fromSelectPair = selected.itemId
+
+            ---@type SlotA[]
+            local slots = {}
+            local u1, u2 = table.unpack(slots, 1, 1)
+            local okU1 = u1.itemId
+            local noU2 = u2.itemId
+
+            local mtObj = setmetatable({ own = u1 }, { __index = SlotA })
+            local rawOwn = rawget(mtObj, "own")
+            local rawFromMt = rawget(mtObj, "itemId")
+            local okRawOwn = rawOwn.itemId
+            local noRawMt = rawFromMt.itemId
+
+            ---@generic T
+            ---@param x T
+            ---@return T
+            local function identity(x) return x end
+            local okId, idRes = pcall(identity, u1)
+            local fromPcallGen = idRes.itemId
+
+            ---@return ErrInfo
+            local function onErr(e) end
+            local okXp, xpRes = xpcall(function() return u1 end, onErr)
+            local fromXpOk = xpRes.itemId
+            local fromXpErr = xpRes.code
+        """.trimIndent())
+        val itemIdDecl = declarations.findElementAt(declarations.text.indexOf("itemId number"))!!.parent
+        val bagIdDecl = declarations.findElementAt(declarations.text.indexOf("bagId string"))!!.parent
+        val codeDecl = declarations.findElementAt(declarations.text.indexOf("code number"))!!.parent
+
+        val ambigRef = file.findReferenceAt(file.text.indexOf("ambig[\"itemId\"]") + 7) as PsiPolyVariantReference
+        assertEquals(2, ambigRef.multiResolve(false).size)
+        assertNull(ambigRef.resolve())
+        assertFalse(ambigRef.isReferenceTo(itemIdDecl))
+
+        assertEquals(itemIdDecl, file.findReferenceAt(file.text.indexOf("bothVal.itemId") + 8)?.resolve())
+        assertEquals(bagIdDecl, file.findReferenceAt(file.text.indexOf("bothVal.bagId") + 8)?.resolve())
+        assertEquals(itemIdDecl, file.findReferenceAt(file.text.indexOf("selected.itemId") + 9)?.resolve())
+        assertEquals(itemIdDecl, file.findReferenceAt(file.text.indexOf("u1.itemId") + 3)?.resolve())
+        assertNull(file.findReferenceAt(file.text.indexOf("u2.itemId") + 3)?.resolve())
+        assertEquals(itemIdDecl, file.findReferenceAt(file.text.indexOf("rawOwn.itemId") + 7)?.resolve())
+        assertNull(file.findReferenceAt(file.text.indexOf("rawFromMt.itemId") + 10)?.resolve())
+        assertEquals(itemIdDecl, file.findReferenceAt(file.text.indexOf("idRes.itemId") + 6)?.resolve())
+        assertEquals(itemIdDecl, file.findReferenceAt(file.text.indexOf("xpRes.itemId") + 6)?.resolve())
+        assertEquals(codeDecl, file.findReferenceAt(file.text.indexOf("xpRes.code") + 6)?.resolve())
+    }
 }

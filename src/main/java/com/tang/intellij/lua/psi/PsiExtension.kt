@@ -200,10 +200,21 @@ private fun mutatedGlobalsInFile(file: PsiFile): Set<String>? {
                 mutated.add(expr.name)
             }
         }
+        fun resolveGlobalRoot(expr: LuaExpr?): String? {
+            var cur = expr ?: return null
+            while (cur is LuaParenExpr) cur = cur.expr ?: return null
+            if (cur !is LuaNameExpr) return null
+            val local = resolveLocal(cur) ?: return cur.name
+            if (local !is LuaNameDef) return null
+            val owner = PsiTreeUtil.getStubOrPsiParentOfType(local, LuaLocalDef::class.java) ?: return null
+            var init = owner.getExprFor(local) ?: return null
+            while (init is LuaParenExpr) init = init.expr ?: return null
+            return if (init is LuaNameExpr && resolveLocal(init) == null) init.name else null
+        }
         fun recordMember(prefix: LuaExpr?, member: String?) {
-            if (member != null && prefix is LuaNameExpr && resolveLocal(prefix) == null) {
-                mutated.add("${prefix.name}.$member")
-            }
+            if (member == null) return
+            val root = resolveGlobalRoot(prefix) ?: return
+            mutated.add("$root.$member")
         }
         PsiTreeUtil.processElements(file) { element ->
             when (element) {
@@ -325,29 +336,53 @@ internal fun selectSignaturesByArity(calleeTy: ITy, argCounts: IntArray, colon: 
 internal fun selectSignaturesByArity(calleeTy: ITy, argCount: Int, colon: Boolean): List<IFunSignature> =
     selectSignaturesByArity(calleeTy, intArrayOf(argCount), colon)
 
-internal fun LuaCallExpr.effectiveArgCounts(context: SearchContext, excludeArgIndex: Int = -1): IntArray {
+internal fun LuaCallExpr.effectiveArgCountsFrom(startIndex: Int, context: SearchContext, excludeArgIndex: Int = -1): IntArray {
     val args = argList
-    if (args.isEmpty()) return intArrayOf(0)
+    val count = args.size - startIndex
+    if (count <= 0) return intArrayOf(0)
     val last = args.last()
     if (args.lastIndex == excludeArgIndex || !last.isMultiReturnExpandable()) {
-        return intArrayOf(args.size)
+        return intArrayOf(count)
     }
     val lastTy = context.withIndex(-1) { last.guessType(context) }
     val counts = LinkedHashSet<Int>(2)
     TyUnion.each(lastTy) { arm ->
-        if (arm is TyTuple) counts.add(args.size - 1 + arm.list.size)
-        else counts.add(args.size)
+        if (arm is TyTuple) counts.add(count - 1 + arm.list.size)
+        else counts.add(count)
     }
-    return if (counts.isEmpty()) intArrayOf(args.size) else counts.toIntArray()
+    return if (counts.isEmpty()) intArrayOf(count) else counts.toIntArray()
 }
+
+internal fun LuaCallExpr.effectiveArgCounts(context: SearchContext, excludeArgIndex: Int = -1): IntArray =
+    effectiveArgCountsFrom(0, context, excludeArgIndex)
 
 internal fun LuaCallExpr.selectCandidateSignatures(calleeTy: ITy, context: SearchContext? = null, excludeArgIndex: Int = -1): List<IFunSignature> {
     val counts = if (context != null) effectiveArgCounts(context, excludeArgIndex) else intArrayOf(argList.size)
     return selectSignaturesByArity(calleeTy, counts, isMethodColonCall)
 }
 
-internal fun resolveRawTableFieldType(tblExpr: LuaExpr, keyExpr: LuaExpr, context: SearchContext): ITy {
-    val tblTy = TyAliasSubstitutor.substitute(context.withIndex(0) { tblExpr.guessType(context) }, context)
+private fun unwrapSetMetatableRawTarget(expr: LuaExpr): LuaExpr? {
+    var cur: LuaExpr? = expr
+    while (cur is LuaParenExpr) cur = cur.expr
+    if (cur is LuaCallExpr && !cur.isMethodColonCall && resolveStandardBuiltin(cur.expr) == "setmetatable") {
+        return cur.argList.getOrNull(0)
+    }
+    if (cur is LuaNameExpr) {
+        val local = resolveLocal(cur) as? LuaNameDef ?: return null
+        val owner = PsiTreeUtil.getStubOrPsiParentOfType(local, LuaLocalDef::class.java) ?: return null
+        if (isLocalReassigned(local, owner)) return null
+        var init = owner.getExprFor(local) ?: return null
+        while (init is LuaParenExpr) init = init.expr ?: return null
+        if (init is LuaCallExpr && !init.isMethodColonCall && resolveStandardBuiltin(init.expr) == "setmetatable") {
+            return init.argList.getOrNull(0)
+        }
+    }
+    return null
+}
+
+internal fun resolveRawTableFieldType(tblExpr: LuaExpr, keyExpr: LuaExpr, context: SearchContext, directOnly: Boolean = false): ITy {
+    val effectiveTbl = if (directOnly) unwrapSetMetatableRawTarget(tblExpr) ?: tblExpr else tblExpr
+    val tblTy = TyAliasSubstitutor.substitute(context.withIndex(0) { effectiveTbl.guessType(context) }, context)
     var key: LuaExpr = keyExpr
     while (key is LuaParenExpr) key = key.expr ?: return Ty.UNKNOWN
     val results = mutableListOf<ITy>()
@@ -375,6 +410,22 @@ internal fun resolveRawTableFieldType(tblExpr: LuaExpr, keyExpr: LuaExpr, contex
         }
     }
     return TyUnion.unionAll(results)
+}
+
+internal fun dropTupleSlots(ty: ITy, skip: Int): ITy {
+    if (skip <= 0) return ty
+    val arms = mutableListOf<ITy>()
+    TyUnion.each(ty) { arm ->
+        if (arm is TyTuple) {
+            val tail = arm.list.drop(skip)
+            when (tail.size) {
+                0 -> Unit
+                1 -> arms.add(tail[0])
+                else -> arms.add(TyTuple(tail))
+            }
+        }
+    }
+    return TyUnion.unionAll(arms)
 }
 
 internal fun prependTupleSlot(first: ITy, tail: ITy): ITy {
@@ -436,7 +487,8 @@ private fun LuaCallExpr.expectedArgumentType(index: Int, context: SearchContext)
                 val fnExpr = args[0]
                 val fnTy = TyAliasSubstitutor.substitute(context.withIndex(0) { fnExpr.guessType(context) }, context)
                 val forwardedIndex = index - argOffset
-                val sigs = selectSignaturesByArity(fnTy, args.size - argOffset, colon = false)
+                val forwardedCounts = effectiveArgCountsFrom(argOffset, context, excludeArgIndex = index)
+                val sigs = selectSignaturesByArity(fnTy, forwardedCounts, colon = false)
                 val selfReceiver = (fnExpr as? LuaIndexExpr)?.prefixExpr?.let {
                     context.withIndex(0) { it.guessType(context) }
                 }
@@ -453,7 +505,8 @@ private fun LuaCallExpr.expectedArgumentType(index: Int, context: SearchContext)
                         if (forwardedIndex < sig.params.size) sig.getParamTy(forwardedIndex)
                         else sig.varargTy ?: Ty.UNKNOWN
                     }
-                    results.add(param.substitute(selfSub))
+                    val generic = createSubstitutor(sig, context, excludeArgIndex = index, startArgIndex = argOffset, colonOverride = false)
+                    results.add((generic?.let { param.substitute(it) } ?: param).substitute(selfSub))
                 }
                 val forwarded = TyUnion.unionAll(results)
                 if (!Ty.isInvalid(forwarded)) return forwarded
