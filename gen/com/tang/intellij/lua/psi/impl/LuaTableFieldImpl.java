@@ -11,6 +11,7 @@ import static com.tang.intellij.lua.psi.LuaTypes.*;
 import com.intellij.extapi.psi.StubBasedPsiElementBase;
 import com.tang.intellij.lua.stubs.LuaTableFieldStub;
 import com.tang.intellij.lua.psi.*;
+import com.intellij.psi.PsiReference;
 import com.intellij.navigation.ItemPresentation;
 import com.tang.intellij.lua.comment.psi.api.LuaComment;
 import com.tang.intellij.lua.search.SearchContext;
@@ -51,6 +52,12 @@ public class LuaTableFieldImpl extends StubBasedPsiElementBase<LuaTableFieldStub
   @Nullable
   public PsiElement getId() {
     return findChildByType(ID);
+  }
+
+  @Override
+  @Nullable
+  public PsiReference getReference() {
+    return LuaPsiImplUtilKt.getReference(this);
   }
 
   @Override

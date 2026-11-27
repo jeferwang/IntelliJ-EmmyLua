@@ -498,6 +498,7 @@ private tableField2 ::= ID '=' expr { pin = 2 }
 
 tableField ::= tableField1 | tableField2 | expr {
     methods = [
+        getReference
         getNameIdentifier
         setName
         getName

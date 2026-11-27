@@ -33,6 +33,7 @@ import com.tang.intellij.lua.comment.psi.LuaDocTagVararg
 import com.tang.intellij.lua.comment.psi.api.LuaComment
 import com.tang.intellij.lua.lang.LuaIcons
 import com.tang.intellij.lua.lang.type.LuaString
+import com.tang.intellij.lua.reference.LuaTableFieldReference
 import com.tang.intellij.lua.search.SearchContext
 import com.tang.intellij.lua.stubs.LuaClassMemberStub
 import com.tang.intellij.lua.stubs.LuaFuncBodyOwnerStub
@@ -451,6 +452,9 @@ fun getTextOffset(localFuncDef: PsiNameIdentifierOwner): Int {
     if (id != null) return id.textOffset
     return localFuncDef.node.startOffset
 }
+
+fun getReference(tableField: LuaTableField): PsiReference? =
+    tableField.id?.let { LuaTableFieldReference(tableField, it) }
 
 fun getNameIdentifier(tableField: LuaTableField): PsiElement? {
     val id = tableField.id

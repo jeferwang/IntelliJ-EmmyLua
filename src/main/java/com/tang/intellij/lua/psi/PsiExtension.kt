@@ -68,11 +68,11 @@ private fun LuaExpr.shouldBeInternal(context: SearchContext): ITy {
     if (p1 is LuaExprList) {
         val p2 = p1.parent
         if (p2 is LuaAssignStat) {
-            val receiver = p2.varExprList.getExprAt(0)
+            val receiver = p2.varExprList.getExprAt(p1.exprStubList.indexOf(this))
             if (receiver != null)
                 return infer(receiver, context)
         } else if (p2 is LuaLocalDef) {
-            val receiver = p2.nameList?.nameDefList?.getOrNull(0)
+            val receiver = p2.nameList?.nameDefList?.getOrNull(p1.exprStubList.indexOf(this))
             if (receiver != null)
                 return infer(receiver, context)
         }
