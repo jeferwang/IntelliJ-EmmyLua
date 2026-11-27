@@ -68,6 +68,37 @@ internal fun acceptsStringKey(keyTy: ITy, keyName: String?): Boolean = when (key
     else -> keyTy == Ty.STRING
 }
 
+private fun isUnconstrainedAtom(ty: ITy): Boolean =
+    Ty.isInvalid(ty) || ty == Ty.NIL || (ty is ITyClass && (ty.isAnonymous || ty.isGlobal) && ty !is TyTable)
+
+private fun isUnconstrainedKeyType(ty: ITy?): Boolean = when {
+    ty == null -> true
+    ty is TyUnion -> ty.getChildTypes().all(::isUnconstrainedAtom)
+    else -> isUnconstrainedAtom(ty)
+}
+
+internal fun acceptsArrayKey(actualKeyTy: ITy?): Boolean {
+    if (isUnconstrainedKeyType(actualKeyTy)) return true
+    if (actualKeyTy is TyUnion) return actualKeyTy.getChildTypes().any { !isUnconstrainedAtom(it) && acceptsArrayKey(it) }
+    return actualKeyTy == Ty.NUMBER
+}
+
+internal fun acceptsIndexKey(expectedKeyTy: ITy, actualKeyTy: ITy?, literalStringName: String?): Boolean {
+    if (literalStringName != null) return acceptsStringKey(expectedKeyTy, literalStringName)
+    if (expectedKeyTy is TyUnknown || isUnconstrainedKeyType(actualKeyTy)) return true
+    if (expectedKeyTy is TyUnion) return expectedKeyTy.getChildTypes().any { acceptsIndexKey(it, actualKeyTy, null) }
+    if (actualKeyTy is TyUnion) return actualKeyTy.getChildTypes().any { !isUnconstrainedAtom(it) && acceptsIndexKey(expectedKeyTy, it, null) }
+    return when (expectedKeyTy) {
+        Ty.NUMBER -> actualKeyTy == Ty.NUMBER
+        Ty.STRING -> actualKeyTy == Ty.STRING || actualKeyTy is TyStringLiteral
+        is TyStringLiteral -> actualKeyTy == Ty.STRING || (actualKeyTy is TyStringLiteral && actualKeyTy.content == expectedKeyTy.content)
+        Ty.BOOLEAN -> actualKeyTy == Ty.BOOLEAN
+        Ty.TABLE -> actualKeyTy == Ty.TABLE || actualKeyTy is ITyClass || actualKeyTy is ITyArray || actualKeyTy is ITyGeneric
+        is ITyClass -> actualKeyTy == Ty.TABLE || actualKeyTy is ITyClass
+        else -> expectedKeyTy == actualKeyTy
+    }
+}
+
 abstract class TyGeneric : Ty(TyKind.Generic), ITyGeneric {
 
     override fun equals(other: Any?): Boolean {

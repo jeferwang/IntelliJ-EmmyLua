@@ -146,11 +146,11 @@ private fun LuaExpr.shouldBeInternal(context: SearchContext): ITy {
                     fieldType = fieldType.union(it.getParamTy(1))
             }
         } else {
-            val keyTy = key?.let { infer(it, context) }
+            val keyTy = key?.let { context.withIndex(0) { infer(it, context) } }
             tyTbl.each {
-                if (it is ITyArray && keyTy != Ty.STRING && keyTy !is TyStringLiteral)
+                if (it is ITyArray && acceptsArrayKey(keyTy))
                     fieldType = fieldType.union(it.base)
-                if (it is ITyGeneric && it.isTableGeneric())
+                if (it is ITyGeneric && it.isTableGeneric() && acceptsIndexKey(it.getParamTy(0), keyTy, null))
                     fieldType = fieldType.union(it.getParamTy(1))
             }
         }
@@ -189,38 +189,47 @@ private fun isLocalReassigned(local: LuaNameDef, owner: LuaLocalDef): Boolean {
     }
 }
 
-private val KEY_TABLE_MUTATED = Key.create<CachedValue<Boolean>>("lua.table_insert_mutated")
-private val KEY_SETMETATABLE_MUTATED = Key.create<CachedValue<Boolean>>("lua.setmetatable_mutated")
+private val KEY_MUTATED_GLOBALS = Key.create<CachedValue<Set<String>>>("lua.mutated_globals")
 
-private fun isGlobalBuiltinMutated(file: PsiFile, name: String, memberName: String?): Boolean {
-    if (file is LuaPsiFile && !file.isContentsLoaded) return true
-    val key = if (memberName == null) KEY_SETMETATABLE_MUTATED else KEY_TABLE_MUTATED
-    return CachedValuesManager.getCachedValue(file, key) {
-        fun global(expr: LuaExpr?): Boolean =
-            expr is LuaNameExpr && expr.name == name && resolveLocal(expr) == null
-
-        val unchanged = PsiTreeUtil.processElements(file) { element ->
-            val writes = when (element) {
-                is LuaAssignStat -> element.varExprList.exprList.any { lhs ->
-                    global(lhs) || (memberName != null && lhs is LuaIndexExpr &&
-                            lhs.name == memberName && global(lhs.prefixExpr))
-                }
-                is LuaFuncDef -> element.name == name && resolveLocal(name, element) == null
-                is LuaClassMethodDef -> memberName != null && element.name == memberName &&
-                        global(element.classMethodName.expr)
-                else -> false
+private fun mutatedGlobalsInFile(file: PsiFile): Set<String>? {
+    if (file is LuaPsiFile && !file.isContentsLoaded) return null
+    return CachedValuesManager.getCachedValue(file, KEY_MUTATED_GLOBALS) {
+        val mutated = HashSet<String>()
+        fun recordGlobal(expr: LuaExpr?) {
+            if (expr is LuaNameExpr && resolveLocal(expr) == null) {
+                mutated.add(expr.name)
             }
-            !writes
         }
-        CachedValueProvider.Result.create(!unchanged, file)
+        fun recordMember(prefix: LuaExpr?, member: String?) {
+            if (member != null && prefix is LuaNameExpr && resolveLocal(prefix) == null) {
+                mutated.add("${prefix.name}.$member")
+            }
+        }
+        PsiTreeUtil.processElements(file) { element ->
+            when (element) {
+                is LuaAssignStat -> {
+                    for (lhs in element.varExprList.exprList) {
+                        recordGlobal(lhs)
+                        if (lhs is LuaIndexExpr) recordMember(lhs.prefixExpr, lhs.name)
+                    }
+                }
+                is LuaFuncDef -> {
+                    val name = element.name
+                    if (name != null && resolveLocal(name, element) == null) mutated.add(name)
+                }
+                is LuaClassMethodDef -> recordMember(element.classMethodName.expr, element.name)
+            }
+            true
+        }
+        CachedValueProvider.Result.create(mutated, file)
     }
 }
 
-internal fun LuaCallExpr.standardTableCall(): StandardTableCall? {
-    val file = containingFile
+internal fun resolveStandardBuiltin(expr: LuaExpr): String? {
+    val file = expr.containingFile
     if (file is LuaPsiFile && !file.isContentsLoaded) return null
-    if (isMethodColonCall) return null
     var callee = expr
+    while (callee is LuaParenExpr) callee = callee.expr ?: return null
     var alias: LuaNameDef? = null
     var owner: LuaLocalDef? = null
     if (callee is LuaNameExpr) {
@@ -232,22 +241,34 @@ internal fun LuaCallExpr.standardTableCall(): StandardTableCall? {
             while (callee is LuaParenExpr) callee = callee.expr ?: return null
         }
     }
+    val mutated = mutatedGlobalsInFile(file) ?: return null
     val builtin = when (callee) {
         is LuaNameExpr -> {
-            if (callee.name != "setmetatable" || resolveInFile(callee.name, callee, null) != null ||
-                    isGlobalBuiltinMutated(file, "setmetatable", null)) return null
-            StandardTableCall.SET_METATABLE
+            val name = callee.name
+            if (resolveInFile(name, callee, null) != null || name in mutated) return null
+            name
         }
         is LuaIndexExpr -> {
-            if (callee.colon != null || callee.name != "insert") return null
+            if (callee.colon != null) return null
+            val member = callee.name ?: return null
             val prefix = callee.prefixExpr as? LuaNameExpr ?: return null
-            if (prefix.name != "table" || resolveInFile(prefix.name, prefix, null) != null ||
-                    isGlobalBuiltinMutated(file, "table", "insert")) return null
-            StandardTableCall.INSERT
+            val root = prefix.name
+            val qualified = "$root.$member"
+            if (resolveInFile(root, prefix, null) != null || root in mutated || qualified in mutated) return null
+            qualified
         }
         else -> return null
     }
     return if (alias != null && owner != null && isLocalReassigned(alias, owner)) null else builtin
+}
+
+internal fun LuaCallExpr.standardTableCall(): StandardTableCall? {
+    if (isMethodColonCall) return null
+    return when (resolveStandardBuiltin(expr)) {
+        "setmetatable" -> StandardTableCall.SET_METATABLE
+        "table.insert" -> StandardTableCall.INSERT
+        else -> null
+    }
 }
 
 internal fun resolveMetatableIndexType(mt: LuaExpr, context: SearchContext): ITy {

@@ -271,26 +271,25 @@ private fun resolveParamType(paramNameDef: LuaParamNameDef, context: SearchConte
 
     //for
     if (paramOwner is LuaForBStat) {
-        val exprList = paramOwner.exprList
-        val callExpr = PsiTreeUtil.findChildOfType(exprList, LuaCallExpr::class.java)
-        val paramIndex = paramOwner.getIndexFor(paramNameDef)
+        val exprs = paramOwner.exprList?.exprStubList.orEmpty()
+        val firstExpr = exprs.firstOrNull()
+        if (firstExpr != null) {
+            val paramIndex = paramOwner.getIndexFor(paramNameDef)
+            val builtinSlot = resolveBuiltinForBParam(firstExpr, exprs, paramIndex, context)
+            if (!Ty.isInvalid(builtinSlot)) return builtinSlot
 
-        // iterator support
-        val type = callExpr?.guessType(context)
-        if (type != null) {
-            var result: ITy = Ty.UNKNOWN
-            TyUnion.each(type) {
+            val iterTy = TyAliasSubstitutor.substitute(context.withIndex(0) { firstExpr.guessType(context) }, context)
+            val slots = mutableListOf<ITy>()
+            TyUnion.each(iterTy) {
                 if (it is ITyFunction) {
-                    val returnTy = it.mainSignature.returnTy
-                    if (returnTy is TyTuple) {
-                        result = result.union(returnTy.list.getOrElse(paramIndex) { Ty.UNKNOWN })
-                    } else if (paramIndex == 0) {
-                        result = result.union(returnTy)
+                    it.process { sig ->
+                        slots.add(extractReturnSlot(sig.returnTy, paramIndex))
+                        true
                     }
                 }
             }
-            if (result != Ty.UNKNOWN)
-                return result
+            val result = TyUnion.unionAll(slots)
+            if (!Ty.isInvalid(result)) return result
         }
     }
     // for param = 1, 2 do end
@@ -374,4 +373,46 @@ private fun findCallbackReceiverType(expr: LuaExpr, context: SearchContext): ITy
         true
     }
     return TyUnion.unionAll(classes)
+}
+
+private fun resolveBuiltinForBParam(firstExpr: LuaExpr, exprs: List<LuaExpr>, paramIndex: Int, context: SearchContext): ITy {
+    if (paramIndex !in 0..1) return Ty.UNKNOWN
+    var cur: LuaExpr = firstExpr
+    while (cur is LuaParenExpr) cur = cur.expr ?: return Ty.UNKNOWN
+    val targetExpr: LuaExpr?
+    val isIpairs: Boolean
+    if (cur is LuaCallExpr && !cur.isMethodColonCall) {
+        when (resolveStandardBuiltin(cur.expr)) {
+            "ipairs" -> {
+                if (paramIndex == 0) return Ty.NUMBER
+                targetExpr = cur.argList.getOrNull(0)
+                isIpairs = true
+            }
+            "pairs" -> {
+                targetExpr = cur.argList.getOrNull(0)
+                isIpairs = false
+            }
+            else -> return Ty.UNKNOWN
+        }
+    } else if (resolveStandardBuiltin(cur) == "next") {
+        targetExpr = exprs.getOrNull(1)
+        isIpairs = false
+    } else {
+        return Ty.UNKNOWN
+    }
+    if (targetExpr == null) return Ty.UNKNOWN
+    val tableTy = TyAliasSubstitutor.substitute(context.withIndex(0) { targetExpr.guessType(context) }, context)
+    val results = mutableListOf<ITy>()
+    TyUnion.each(tableTy) { ty ->
+        when {
+            ty is ITyArray -> results.add(if (paramIndex == 0) Ty.NUMBER else ty.base)
+            ty is ITyGeneric && ty.isTableGeneric() -> {
+                val keyTy = ty.getParamTy(0)
+                if (!isIpairs || acceptsIndexKey(keyTy, Ty.NUMBER, null)) {
+                    results.add(if (paramIndex == 0) keyTy else ty.getParamTy(1))
+                }
+            }
+        }
+    }
+    return TyUnion.unionAll(results)
 }

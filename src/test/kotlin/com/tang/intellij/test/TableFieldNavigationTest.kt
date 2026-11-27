@@ -680,4 +680,54 @@ class TableFieldNavigationTest : LuaTestBase() {
         val tableB = PsiTreeUtil.findChildOfType(modB, LuaTableExpr::class.java)!!
         assertNotEquals(getTableTypeName(tableA), getTableTypeName(tableB))
     }
+
+    fun testGenericForIteratorsAndDynamicIndexing() {
+        val declarations = myFixture.addFileToProject("LoopDecls.lua", """
+            ---@class SlotA
+            ---@field itemId number
+            local SlotA = {}
+
+            ---@class SlotB
+            ---@field bagId string
+            local SlotB = {}
+        """.trimIndent())
+        val file = myFixture.configureByText("LoopUsage.lua", """
+            ---@type SlotA[]
+            local list = {}
+            for i, v in ipairs(list) do
+                local id = v.itemId
+                list[i] = { itemId = 1 }
+            end
+
+            ---@type table<string, SlotB>
+            local map = {}
+            for k, v in pairs(map) do
+                local id = v.bagId
+                map[k] = { bagId = "a" }
+            end
+
+            for k, v in next, map do
+                local id = v.bagId
+            end
+
+            ---@type SlotA[] | table<string, SlotB>
+            local mixed = {}
+            local strKey = "foo"
+            mixed[strKey] = { bagId = "b", itemId = 2 }
+            local numKey = 1
+            mixed[numKey] = { itemId = 3, bagId = "c" }
+        """.trimIndent())
+        val itemIdDecl = declarations.findElementAt(declarations.text.indexOf("itemId number"))!!.parent
+        val bagIdDecl = declarations.findElementAt(declarations.text.indexOf("bagId string"))!!.parent
+
+        assertEquals(itemIdDecl, file.findReferenceAt(file.text.indexOf("v.itemId") + 2)?.resolve())
+        assertEquals(itemIdDecl, file.findReferenceAt(file.text.indexOf("itemId = 1"))?.resolve())
+        assertEquals(bagIdDecl, file.findReferenceAt(file.text.indexOf("v.bagId") + 2)?.resolve())
+        assertEquals(bagIdDecl, file.findReferenceAt(file.text.indexOf("bagId = \"a\""))?.resolve())
+        assertEquals(bagIdDecl, file.findReferenceAt(file.text.lastIndexOf("v.bagId") + 2)?.resolve())
+        assertEquals(bagIdDecl, file.findReferenceAt(file.text.indexOf("bagId = \"b\""))?.resolve())
+        assertNull(file.findReferenceAt(file.text.indexOf("itemId = 2"))?.resolve())
+        assertEquals(itemIdDecl, file.findReferenceAt(file.text.indexOf("itemId = 3"))?.resolve())
+        assertNull(file.findReferenceAt(file.text.indexOf("bagId = \"c\""))?.resolve())
+    }
 }

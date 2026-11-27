@@ -331,28 +331,26 @@ private fun LuaIndexExpr.infer(context: SearchContext): ITy {
     val retTy = recursionGuard(this, Computable {
         val indexExpr = this
         var parentTy: ITy? = null
-        // xxx[yyy] as an array element?
+        // xxx[yyy] as an array or map element?
         if (indexExpr.brack) {
-            val tySet = indexExpr.guessParentType(context)
-            var ty: ITy = Ty.UNKNOWN
+            val tySet = TyAliasSubstitutor.substitute(indexExpr.guessParentType(context), context)
+            val keyExpr = indexExpr.exprList.getOrNull(1)
+            val isStringLiteral = keyExpr is LuaLiteralExpr && keyExpr.kind == LuaLiteralKind.String
+            val literalKey = if (isStringLiteral) indexExpr.name else null
+            val keyTy = if (isStringLiteral) null else keyExpr?.let { context.withIndex(0) { infer(it, context) } }
 
-            // Type[]
-            val stringKey = indexExpr.idExpr
-            if (stringKey == null) {
-                TyUnion.each(tySet) {
-                    if (it is ITyArray) ty = ty.union(it.base)
-                }
-            }
-            if (ty !is TyUnknown) return@Computable ty
-
-            // table<number, Type>
+            val matched = mutableListOf<ITy>()
             TyUnion.each(tySet) {
-                if (it is ITyGeneric && it.isTableGeneric() &&
-                        (stringKey == null || acceptsStringKey(it.getParamTy(0), indexExpr.name))) {
-                    ty = ty.union(it.getParamTy(1))
+                if (it is ITyArray && !isStringLiteral && acceptsArrayKey(keyTy)) {
+                    matched.add(it.base)
+                } else if (it is ITyGeneric && it.isTableGeneric() &&
+                        (!isStringLiteral || literalKey != null) &&
+                        acceptsIndexKey(it.getParamTy(0), keyTy, literalKey)) {
+                    matched.add(it.getParamTy(1))
                 }
             }
-            if (ty !is TyUnknown) return@Computable ty
+            val ty = TyUnion.unionAll(matched)
+            if (!Ty.isInvalid(ty)) return@Computable ty
 
             parentTy = tySet
         }
