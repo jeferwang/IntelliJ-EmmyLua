@@ -34,12 +34,12 @@ interface LuaFuncBodyOwnerStub<T : LuaFuncBodyOwner> : StubElement<T> {
     val overloads: Array<IFunSignature>
     val varargTy: ITy?
 
-    private fun walkStub(stub: StubElement<*>, context: SearchContext): ITy? {
+    private fun walkStub(stub: StubElement<*>, context: SearchContext, acc: MutableList<ITy>) {
         val psi = stub.psi
-        return recursionGuard(stub, Computable {
-            val ty = when (psi) {
+        recursionGuard(stub, Computable {
+            when (psi) {
                 is LuaReturnStat -> {
-                    guessReturnType(psi, context.index, context)
+                    acc.add(guessReturnType(psi, context.index, context))
                 }
                 is LuaFuncBody,
                 is LuaDoStat,
@@ -48,21 +48,17 @@ interface LuaFuncBodyOwnerStub<T : LuaFuncBodyOwner> : StubElement<T> {
                 is LuaForAStat,
                 is LuaForBStat,
                 is LuaRepeatStat -> {
-                    collectReturns(stub, context)
+                    collectReturns(stub, context, acc)
                 }
-                else -> null
             }
-            ty
+            Unit
         })
     }
 
-    private fun collectReturns(parent: StubElement<*>, context: SearchContext): ITy? {
-        var result: ITy? = null
+    private fun collectReturns(parent: StubElement<*>, context: SearchContext, acc: MutableList<ITy>) {
         for (child in parent.childrenStubs) {
-            val ty = walkStub(child, context) ?: continue
-            result = result?.union(ty) ?: ty
+            walkStub(child, context, acc)
         }
-        return result
     }
 
     fun guessReturnTy(context: SearchContext): ITy {
@@ -70,6 +66,8 @@ interface LuaFuncBodyOwnerStub<T : LuaFuncBodyOwner> : StubElement<T> {
         if (docTy != null) {
             return if (context.guessTuple()) docTy else extractReturnSlot(docTy, context.index)
         }
-        return collectReturns(this, context) ?: Ty.VOID
+        val acc = mutableListOf<ITy>()
+        collectReturns(this, context, acc)
+        return if (acc.isEmpty()) Ty.VOID else TyUnion.unionAll(acc)
     }
 }

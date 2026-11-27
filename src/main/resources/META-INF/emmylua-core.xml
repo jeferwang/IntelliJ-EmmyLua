@@ -57,6 +57,7 @@
         <lang.findUsagesProvider language="Lua" implementationClass="com.tang.intellij.lua.usages.LuaFindUsagesProvider"/>
         <findUsagesHandlerFactory implementation="com.tang.intellij.lua.usages.LuaFindUsagesHandlerFactory"/>
         <usageTypeProvider implementation="com.tang.intellij.lua.usages.UsageTypeProvider"/>
+        <referencesSearch implementation="com.tang.intellij.lua.reference.LuaEscapedTableFieldReferencesSearch"/>
 
         <!--refactor-->
         <lang.refactoringSupport language="Lua" implementationClass="com.tang.intellij.lua.editor.LuaRefactoringSupportProvider"/>

@@ -49,7 +49,7 @@ object LuaElementTypes {
     val UNARY_EXPR = LuaUnaryExprType()
     val BINARY_EXPR = LuaBinaryExprType()
 
-    val RETURN_STAT = LuaPlaceholderStub.Type("RETURN_STAT", ::LuaReturnStatImpl)
+    val RETURN_STAT = LuaReturnStatType()
     val DO_STAT = LuaPlaceholderStub.Type("DO_STAT", ::LuaDoStatImpl)
     val IF_STAT = LuaPlaceholderStub.Type("IF_STAT", ::LuaIfStatImpl)
     val EXPR_STAT = LuaPlaceholderStub.Type("CALL_STAT", ::LuaExprStatImpl)

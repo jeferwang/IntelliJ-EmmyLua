@@ -246,8 +246,7 @@ fun guessTypeAt(list: LuaExprList, context: SearchContext): ITy {
         return context.withIndex(0) { exprList[targetIndex].guessType(context) }
     }
     val last = exprList.last()
-    val expandable = last is LuaCallExpr || (last is LuaLiteralExpr && last.kind == LuaLiteralKind.Varargs)
-    if (!expandable) return Ty.UNKNOWN
+    if (!last.isMultiReturnExpandable()) return Ty.UNKNOWN
     return context.withIndex(targetIndex - exprList.lastIndex) { last.guessType(context) }
 }
 
@@ -453,10 +452,12 @@ fun getReference(tableField: LuaTableField): PsiReference? {
     }
     val idExpr = tableField.idExpr
     if (idExpr is LuaLiteralExpr && idExpr.kind == LuaLiteralKind.String) {
-        val content = LuaString.getContent(idExpr.text)
-        if (content.length > 0 && content.value.isNotEmpty()) {
+        val text = idExpr.text
+        val content = LuaString.getContent(text)
+        val decoded = LuaString.decode(text, content)
+        if (content.length > 0 && decoded.isNotEmpty()) {
             val range = TextRange.from(idExpr.startOffsetInParent + content.start, content.length)
-            return LuaTableFieldReference(tableField, content.value, range)
+            return LuaTableFieldReference(tableField, decoded, range)
         }
     }
     return null
@@ -541,7 +542,7 @@ fun getName(tableField: LuaTableField): String? {
 
     val idExpr = tableField.idExpr
     if (idExpr is LuaLiteralExpr && idExpr.kind == LuaLiteralKind.String)
-        return LuaString.getContent(idExpr.text).value
+        return LuaString.decode(idExpr.text)
     return null
 }
 
@@ -611,25 +612,13 @@ fun guessReturnType(returnStat: LuaReturnStat?, index: Int, context: SearchConte
     if (returnStat == null) return Ty.UNKNOWN
     return context.withIndex(index) {
         val returnExpr = returnStat.exprList
-        if (index <= 0 && !(context.forStub && returnStat.stub != null)) {
-            val docTy = returnStat.comment?.ty
+        if (index <= 0) {
+            val stub = returnStat.stub
+            val docTy = (stub as? com.tang.intellij.lua.stubs.LuaReturnStatStub)?.docTy
+                ?: if (stub == null) returnStat.comment?.ty else null
             if (docTy != null && !Ty.isInvalid(docTy)) {
                 if (index == 0) return@withIndex docTy
-                val exprs = returnExpr?.exprStubList.orEmpty()
-                if (exprs.size <= 1) return@withIndex docTy
-                val result = mutableListOf(docTy)
-                val lastIndex = exprs.lastIndex
-                for (i in 1..lastIndex) {
-                    val expr = exprs[i]
-                    if (i < lastIndex) {
-                        result.add(context.withIndex(0) { expr.guessType(context) })
-                    } else {
-                        val lastTy = if (expr is LuaParenExpr) context.withIndex(0) { expr.guessType(context) }
-                        else context.withIndex(-1) { expr.guessType(context) }
-                        if (lastTy is TyTuple) result.addAll(lastTy.list) else result.add(lastTy)
-                    }
-                }
-                return@withIndex TyTuple(result)
+                return@withIndex adjustExprList(returnExpr?.exprStubList.orEmpty(), context, slot0Override = docTy)
             }
         }
         if (context.guessTuple()) returnExpr?.guessType(context) ?: Ty.UNKNOWN

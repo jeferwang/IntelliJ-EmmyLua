@@ -23,6 +23,9 @@ import com.intellij.psi.tree.IStubFileElementType
 import com.tang.intellij.lua.lang.LuaLanguage
 import com.tang.intellij.lua.psi.LuaBlock
 import com.tang.intellij.lua.psi.LuaPsiElement
+import com.tang.intellij.lua.psi.LuaReturnStat
+import com.tang.intellij.lua.psi.impl.LuaReturnStatImpl
+import com.tang.intellij.lua.psi.ty
 import com.tang.intellij.lua.ty.ITy
 import com.tang.intellij.lua.ty.Ty
 
@@ -49,7 +52,7 @@ abstract class LuaStubBase<T : PsiElement>(parent: StubElement<*>?, type: LuaStu
     }
 }
 
-class LuaPlaceholderStub(parent: StubElement<*>?, elementType: LuaStubElementType<*, *>)
+open class LuaPlaceholderStub(parent: StubElement<*>?, elementType: LuaStubElementType<*, *>)
     : LuaStubBase<LuaPsiElement>(parent, elementType) {
 
     class Type<PsiT : LuaPsiElement>(debugName: String, private val ctor: (LuaPlaceholderStub, IStubElementType<*, *>) -> PsiT)
@@ -74,6 +77,37 @@ class LuaPlaceholderStub(parent: StubElement<*>?, elementType: LuaStubElementTyp
 
         override fun indexStub(stub: LuaPlaceholderStub, sink: IndexSink) {
         }
+    }
+}
+
+class LuaReturnStatStub(
+    val docTy: ITy?,
+    parent: StubElement<*>?,
+    elementType: LuaStubElementType<*, *>
+) : LuaPlaceholderStub(parent, elementType)
+
+class LuaReturnStatType : LuaStubElementType<LuaReturnStatStub, LuaReturnStat>("RETURN_STAT") {
+    override fun createStub(psi: LuaReturnStat, parentStub: StubElement<*>?): LuaReturnStatStub {
+        return LuaReturnStatStub(psi.comment?.ty, parentStub, this)
+    }
+
+    override fun shouldCreateStub(node: ASTNode): Boolean {
+        return createStubIfParentIsStub(node)
+    }
+
+    override fun serialize(stub: LuaReturnStatStub, dataStream: StubOutputStream) {
+        dataStream.writeTyNullable(stub.docTy)
+    }
+
+    override fun deserialize(dataStream: StubInputStream, parentStub: StubElement<*>?): LuaReturnStatStub {
+        return LuaReturnStatStub(dataStream.readTyNullable(), parentStub, this)
+    }
+
+    override fun createPsi(stub: LuaReturnStatStub): LuaReturnStat {
+        return LuaReturnStatImpl(stub, this)
+    }
+
+    override fun indexStub(stub: LuaReturnStatStub, sink: IndexSink) {
     }
 }
 

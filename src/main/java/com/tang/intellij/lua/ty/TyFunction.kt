@@ -113,24 +113,45 @@ fun IFunSignature.hasVarargs(): Boolean {
 
 fun IFunSignature.isGeneric() = tyParameters.isNotEmpty()
 
+private fun sameTyParameters(a: Array<TyParameter>, b: Array<TyParameter>): Boolean {
+    if (a.size != b.size) return false
+    for (i in a.indices) {
+        if (a[i].name != b[i].name || a[i].superClassName != b[i].superClassName) return false
+    }
+    return true
+}
+
+private fun hashTyParameters(params: Array<TyParameter>): Int {
+    var code = 1
+    for (p in params) {
+        code = 31 * code + p.name.hashCode()
+        code = 31 * code + (p.superClassName?.hashCode() ?: 0)
+    }
+    return code
+}
+
 abstract class FunSignatureBase(override val colonCall: Boolean,
                                 override val params: Array<LuaParamInfo>,
                                 override val tyParameters: Array<TyParameter> = emptyArray()
 ) : IFunSignature {
     override fun equals(other: Any?): Boolean {
-        if (other is IFunSignature) {
-            if (params.size != other.params.size)
-                return false
-            return params.indices.none { params[it] != other.params.getOrNull(it) }
-        }
-        return false
+        if (this === other) return true
+        if (other == null || javaClass != other.javaClass) return false
+        other as FunSignatureBase
+        if (colonCall != other.colonCall) return false
+        if (params.size != other.params.size)
+            return false
+        if (!sameTyParameters(tyParameters, other.tyParameters))
+            return false
+        return params.indices.none { params[it] != other.params.getOrNull(it) }
     }
 
     override fun hashCode(): Int {
-        var code = 0//returnTy.hashCode()
+        var code = colonCall.hashCode()
         params.forEach {
-            code += it.ty.hashCode() * 31
+            code = 31 * code + it.ty.hashCode()
         }
+        code = 31 * code + hashTyParameters(tyParameters)
         return code
     }
 
@@ -181,15 +202,13 @@ class FunSignature(colonCall: Boolean,
     override fun equals(other: Any?): Boolean {
         if (this === other) return true
         if (other !is FunSignature) return false
-        return colonCall == other.colonCall &&
-                returnTy == other.returnTy &&
+        return returnTy == other.returnTy &&
                 varargTy == other.varargTy &&
                 super.equals(other)
     }
 
     override fun hashCode(): Int {
         var code = super.hashCode()
-        code = 31 * code + colonCall.hashCode()
         code = 31 * code + returnTy.hashCode()
         code = 31 * code + (varargTy?.hashCode() ?: 0)
         return code
@@ -284,6 +303,8 @@ fun ITyFunction.findPerfectSignature(call: LuaCallExpr): IFunSignature {
 abstract class TyFunction : Ty(TyKind.Function), ITyFunction {
 
     override fun equals(other: Any?): Boolean {
+        if (this === other) return true
+        if (other is TyPsiFunction) return false
         if (other is ITyFunction) {
             if (mainSignature != other.mainSignature)
                 return false
@@ -348,29 +369,42 @@ class TyPsiFunction(private val colonCall: Boolean, val psi: LuaFuncBodyOwner, f
         return code
     }
 
-    override val mainSignature: IFunSignature by lazy {
-
-        object : FunSignatureBase(colonCall, psi.params, psi.tyParams) {
-            override val returnTy: ITy by lazy {
-                val context = SearchContext.get(psi.project)
-                var returnTy = context.withIndex(-1) { psi.guessReturnType(context) }
-                /**
-                 * todo optimize this bug solution
-                 * local function test()
-                 *      return test
-                 * end
-                 * -- will crash after type `test`
-                 */
-                if (returnTy is TyPsiFunction && returnTy.psi == psi) {
-                    returnTy = UNKNOWN
-                }
-
-                returnTy
+    private class PsiFunSignature(
+        private val owner: TyPsiFunction,
+        colonCall: Boolean,
+        params: Array<LuaParamInfo>,
+        tyParameters: Array<TyParameter>
+    ) : FunSignatureBase(colonCall, params, tyParameters) {
+        override val returnTy: ITy by lazy {
+            val psi = owner.psi
+            val context = SearchContext.get(psi.project)
+            var returnTy = context.withIndex(-1) { psi.guessReturnType(context) }
+            /**
+             * todo optimize this bug solution
+             * local function test()
+             *      return test
+             * end
+             * -- will crash after type `test`
+             */
+            if (returnTy is TyPsiFunction && returnTy.psi == psi) {
+                returnTy = UNKNOWN
             }
 
-            override val varargTy: ITy?
-                get() = psi.varargType
+            returnTy
         }
+
+        override val varargTy: ITy?
+            get() = owner.psi.varargType
+
+        override fun equals(other: Any?): Boolean {
+            return this === other || (other is PsiFunSignature && owner == other.owner)
+        }
+
+        override fun hashCode(): Int = owner.hashCode()
+    }
+
+    override val mainSignature: IFunSignature by lazy {
+        PsiFunSignature(this, colonCall, psi.params, psi.tyParams)
     }
 
     override val signatures: Array<IFunSignature> by lazy {

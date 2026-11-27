@@ -76,7 +76,7 @@ private fun inferReturnTyInner(owner: LuaFuncBodyOwner, searchContext: SearchCon
 
     //infer from return stat
     return searchContext.withRecursionGuard(owner, GuardType.RecursionCall) {
-        var type: ITy = Ty.VOID
+        val collected = mutableListOf<ITy>()
         owner.acceptChildren(object : LuaRecursiveVisitor() {
             override fun visitReturnStat(o: LuaReturnStat) {
                 val guessReturnType = guessReturnType(o, searchContext.index, searchContext)
@@ -93,7 +93,7 @@ private fun inferReturnTyInner(owner: LuaFuncBodyOwner, searchContext: SearchCon
                      *
                      * type of r is an anonymous ty
                      */
-                    type = type.union(it)
+                    collected.add(it)
                 }
             }
 
@@ -106,7 +106,7 @@ private fun inferReturnTyInner(owner: LuaFuncBodyOwner, searchContext: SearchCon
             override fun visitLocalDef(o: LuaLocalDef) {}
             override fun visitLocalFuncDef(o: LuaLocalFuncDef) {}
         })
-        type
+        if (collected.isEmpty()) Ty.VOID else TyUnion.unionAll(collected)
     }
 }
 
@@ -317,11 +317,7 @@ private fun resolveParamType(paramNameDef: LuaParamNameDef, context: SearchConte
                 it.process { sig ->
                     val paramTy = if (sig.colonCall) {
                         if (paramIndex == 0) {
-                            ownerSelf ?: (paramOwner.parent as? LuaTableField)?.let { tf ->
-                                (tf.parent as? LuaTableExpr)?.shouldBe(context)?.let { tblTy ->
-                                    TyUnion.getPerfectClass(tblTy)?.takeUnless { c -> c.isAnonymous || c.isGlobal }
-                                }
-                            } ?: Ty.UNKNOWN
+                            ownerSelf ?: findCallbackReceiverType(paramOwner, context)
                         } else if (paramIndex - 1 < sig.params.size) {
                             sig.getParamTy(paramIndex - 1)
                         } else {
@@ -339,4 +335,43 @@ private fun resolveParamType(paramNameDef: LuaParamNameDef, context: SearchConte
         return ret
     }
     return Ty.UNKNOWN
+}
+
+private fun findCallbackReceiverType(expr: LuaExpr, context: SearchContext): ITy {
+    var cur: LuaExpr = expr
+    var containerTy: ITy? = null
+    while (containerTy == null) {
+        when (val parent = cur.parent) {
+            is LuaParenExpr -> cur = parent
+            is LuaBinaryExpr -> {
+                val op = parent.stub?.opType ?: parent.binaryOp.node.firstChildNode?.elementType
+                val propagates = (op == LuaTypes.AND && cur == parent.right) ||
+                        (op == LuaTypes.OR && (cur == parent.left || cur == parent.right))
+                if (propagates) cur = parent else break
+            }
+            is LuaTableField -> {
+                if (parent.valueExpr == cur) {
+                    containerTy = (parent.parent as? LuaTableExpr)?.shouldBe(context)
+                }
+                break
+            }
+            is LuaExprList -> {
+                val assign = parent.parent as? LuaAssignStat
+                if (assign != null && parent == assign.valueExprList) {
+                    val idx = parent.exprStubList.indexOf(cur)
+                    val lhs = assign.varExprList.getExprAt(idx) as? LuaIndexExpr
+                    containerTy = lhs?.guessParentType(context)
+                }
+                break
+            }
+            else -> break
+        }
+    }
+    if (containerTy == null) return Ty.UNKNOWN
+    val classes = mutableListOf<ITy>()
+    containerTy.eachTopClass { c ->
+        if (!c.isAnonymous && !c.isGlobal) classes.add(c)
+        true
+    }
+    return TyUnion.unionAll(classes)
 }

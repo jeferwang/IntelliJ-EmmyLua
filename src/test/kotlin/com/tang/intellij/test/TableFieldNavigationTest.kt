@@ -412,7 +412,7 @@ class TableFieldNavigationTest : LuaTestBase() {
         """.trimIndent())
         val field = declarations.findElementAt(declarations.text.indexOf("itemId"))!!.parent
         val countField = declarations.findElementAt(declarations.text.indexOf("count"))!!.parent
-        val itemRef = file.findReferenceAt(file.text.indexOf("\"itemId\"") + 1)!!
+        val itemRef = file.findReferenceAt(file.text.indexOf("[\"itemId\"]") + 2)!!
         assertEquals(field, itemRef.resolve())
         assertTrue(itemRef.isReferenceTo(field))
         assertEquals(countField, file.findReferenceAt(file.text.indexOf("'count'") + 1)?.resolve())
@@ -527,5 +527,110 @@ class TableFieldNavigationTest : LuaTestBase() {
         assertEquals(itemIdDecl, file.findReferenceAt(file.text.indexOf("b.itemId") + 2)?.resolve())
         assertEquals(itemIdDecl, file.findReferenceAt(file.text.indexOf("fromWrapped = slot.itemId") + "fromWrapped = slot.".length)?.resolve())
         assertNull(file.findReferenceAt(file.text.indexOf("itemId = 2"))?.resolve())
+    }
+
+    fun testReassignedAliasesEscapedKeysTuplesAndOverloadReturns() {
+        val declarations = myFixture.addFileToProject("ReviewDecls.lua", """
+            ---@class LoadoutSnapshotSlot
+            ---@field itemId number
+            local LoadoutSnapshotSlot = {}
+
+            ---@class BagSlot
+            ---@field bagId string
+            local BagSlot = {}
+
+            ---@class ResultA
+            ---@field onlyA number
+            local ResultA = {}
+
+            ---@class ResultB
+            ---@field onlyB string
+            local ResultB = {}
+
+            ---@class Handler
+            ---@field tag string
+            Handler = {}
+
+            ---@param slot LoadoutSnapshotSlot
+            ---@return LoadoutSnapshotSlot
+            function Handler:handle(slot) end
+        """.trimIndent())
+        val file = myFixture.configureByText("ReviewUsage.lua", """
+            ---@type LoadoutSnapshotSlot[]
+            local slots = {}
+
+            local put = table.insert
+            put = function(a, b) end
+            put(slots, { itemId = 1 })
+
+            ---@type LoadoutSnapshotSlot
+            local escaped = {
+                ["\105temId"] = 2,
+                ['\x69temId'] = 3,
+                ["\u{69}temId"] = 4,
+            }
+
+            ---@return number, LoadoutSnapshotSlot
+            local function pairA() end
+            ---@return string, BagSlot
+            local function pairB() end
+            local function eitherPair(flag)
+                if flag then return pairA() else return pairB() end
+            end
+            local function wrappedEither(flag) return true, eitherPair(flag) end
+            local ok, first, third = wrappedEither(true)
+            local fromA = third.itemId
+            local fromB = third.bagId
+
+            local function logicalRet(flag) return flag and pairA() end
+            local l1, l2 = logicalRet(true)
+            l2 = { itemId = 5 }
+
+            local function annotatedMulti()
+                ---@type BagSlot
+                return pairA()
+            end
+            local am1, am2 = annotatedMulti()
+            local x1 = am1.bagId
+            local x2 = am2.itemId
+
+            ---@type Handler
+            local h = {
+                handle = (function(self, slot)
+                    return self.tag
+                end)
+            }
+
+            ---@overload fun(b: BagSlot, n: number): ResultB
+            ---@param a LoadoutSnapshotSlot
+            ---@return ResultA
+            local function pick(a) end
+            local r1 = pick({ itemId = 6 })
+            local a1 = r1.onlyA
+            local b1 = r1.onlyB
+            local r2 = pick({ bagId = "x" }, 2)
+            local b2 = r2.onlyB
+            local a2 = r2.onlyA
+        """.trimIndent())
+        val itemIdDecl = declarations.findElementAt(declarations.text.indexOf("itemId number"))!!.parent
+        val bagIdDecl = declarations.findElementAt(declarations.text.indexOf("bagId string"))!!.parent
+        val onlyADecl = declarations.findElementAt(declarations.text.indexOf("onlyA number"))!!.parent
+        val onlyBDecl = declarations.findElementAt(declarations.text.indexOf("onlyB string"))!!.parent
+        val tagDecl = declarations.findElementAt(declarations.text.indexOf("tag string"))!!.parent
+
+        assertNull(file.findReferenceAt(file.text.indexOf("itemId = 1"))?.resolve())
+        assertEquals(itemIdDecl, file.findReferenceAt(file.text.indexOf("\\105temId"))?.resolve())
+        assertEquals(itemIdDecl, file.findReferenceAt(file.text.indexOf("\\x69temId"))?.resolve())
+        assertEquals(itemIdDecl, file.findReferenceAt(file.text.indexOf("\\u{69}temId"))?.resolve())
+        assertEquals(itemIdDecl, file.findReferenceAt(file.text.indexOf("third.itemId") + 6)?.resolve())
+        assertEquals(bagIdDecl, file.findReferenceAt(file.text.indexOf("third.bagId") + 6)?.resolve())
+        assertNull(file.findReferenceAt(file.text.indexOf("itemId = 5"))?.resolve())
+        assertEquals(bagIdDecl, file.findReferenceAt(file.text.indexOf("am1.bagId") + 4)?.resolve())
+        assertEquals(itemIdDecl, file.findReferenceAt(file.text.indexOf("am2.itemId") + 4)?.resolve())
+        assertEquals(tagDecl, file.findReferenceAt(file.text.indexOf("self.tag") + 5)?.resolve())
+        assertEquals(onlyADecl, file.findReferenceAt(file.text.indexOf("r1.onlyA") + 3)?.resolve())
+        assertNull(file.findReferenceAt(file.text.indexOf("r1.onlyB") + 3)?.resolve())
+        assertEquals(onlyBDecl, file.findReferenceAt(file.text.indexOf("r2.onlyB") + 3)?.resolve())
+        assertNull(file.findReferenceAt(file.text.indexOf("r2.onlyA") + 3)?.resolve())
     }
 }

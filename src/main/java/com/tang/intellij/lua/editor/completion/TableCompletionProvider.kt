@@ -29,7 +29,6 @@ import com.tang.intellij.lua.psi.LuaTableExpr
 import com.tang.intellij.lua.psi.LuaTableField
 import com.tang.intellij.lua.psi.LuaTypes
 import com.tang.intellij.lua.psi.shouldBe
-import com.tang.intellij.lua.refactoring.LuaRefactoringUtil
 import com.tang.intellij.lua.search.SearchContext
 import com.tang.intellij.lua.ty.ITy
 import com.tang.intellij.lua.ty.isAnonymous
@@ -57,6 +56,23 @@ class TableCompletionProvider : ClassMemberCompletionProvider() {
                 "__tostring" to "Meta method",
                 "__metatable" to "Meta method"
         )
+
+        private val luaKeywords = setOf(
+                "and", "break", "do", "else", "elseif", "end", "false", "for", "function",
+                "goto", "if", "in", "local", "nil", "not", "or", "repeat", "return",
+                "then", "true", "until", "while"
+        )
+
+        internal fun isValidLuaBareKey(name: String): Boolean {
+            if (name.isEmpty() || name in luaKeywords) return false
+            val first = name[0]
+            if (first !in 'a'..'z' && first !in 'A'..'Z' && first != '_') return false
+            for (i in 1 until name.length) {
+                val ch = name[i]
+                if (ch !in 'a'..'z' && ch !in 'A'..'Z' && ch !in '0'..'9' && ch != '_') return false
+            }
+            return true
+        }
     }
     override fun addCompletions(session: CompletionSession) {
         val completionParameters = session.parameters
@@ -95,7 +111,7 @@ class TableCompletionProvider : ClassMemberCompletionProvider() {
                         member.name?.let { name ->
                             if (member is LuaClassField &&
                                 name !in existingKeys &&
-                                LuaRefactoringUtil.isLuaIdentifier(name) &&
+                                isValidLuaBareKey(name) &&
                                 prefixMatcher.prefixMatches(name) &&
                                 addedKeys.add(name)
                             ) {

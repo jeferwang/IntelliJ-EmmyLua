@@ -66,7 +66,7 @@ private fun LuaUnaryExpr.infer(context: SearchContext): ITy {
     val operator = if (stub != null) stub.opType else unaryOp.node.firstChildNode.elementType
 
     return when (operator) {
-        LuaTypes.MINUS -> infer(expr, context) // Negative something
+        LuaTypes.MINUS -> context.withIndex(0) { infer(expr, context) } // Negative something
         LuaTypes.GETN -> Ty.NUMBER // Table length is a number
         else -> Ty.UNKNOWN
     }
@@ -96,21 +96,23 @@ private fun LuaBinaryExpr.infer(context: SearchContext): ITy {
 }
 
 private fun guessAndOrType(binaryExpr: LuaBinaryExpr, operator: IElementType?, context:SearchContext): ITy {
-    val rhs = binaryExpr.right
-    //and
-    if (operator == LuaTypes.AND)
-        return infer(rhs, context)
+    return context.withIndex(0) {
+        val rhs = binaryExpr.right
+        //and
+        if (operator == LuaTypes.AND)
+            return@withIndex infer(rhs, context)
 
-    //or
-    val lhs = binaryExpr.left
-    val lty = infer(lhs, context)
-    return if (rhs != null) lty.union(infer(rhs, context)) else lty
+        //or
+        val lhs = binaryExpr.left
+        val lty = infer(lhs, context)
+        if (rhs != null) lty.union(infer(rhs, context)) else lty
+    }
 }
 
 private fun guessBinaryOpType(binaryExpr : LuaBinaryExpr, context:SearchContext): ITy {
     val lhs = binaryExpr.left
     // TODO: Search for operator overrides
-    return infer(lhs, context)
+    return context.withIndex(0) { infer(lhs, context) }
 }
 
 fun LuaCallExpr.createSubstitutor(sig: IFunSignature, context: SearchContext, excludeArgIndex: Int = -1): ITySubstitutor? {
@@ -195,17 +197,17 @@ private fun LuaCallExpr.infer(context: SearchContext): ITy {
         }
     }
     val ty = TyAliasSubstitutor.substitute(infer(expr, context), context)
-    TyUnion.each(ty) {
-        when (it) {
-            is ITyFunction -> {
-                it.process(Processor { sig ->
-                    ret = ret.union(getReturnTy(sig, context))
-                    true
-                })
-            }
-            //constructor : Class table __call
-            is ITyClass -> ret = ret.union(it)
+    val selected = selectCandidateSignatures(ty)
+    if (selected.isNotEmpty()) {
+        val retTypes = ArrayList<ITy>(selected.size)
+        for (sig in selected) {
+            retTypes.add(getReturnTy(sig, context))
         }
+        ret = ret.union(TyUnion.unionAll(retTypes))
+    }
+    TyUnion.each(ty) {
+        //constructor : Class table __call
+        if (it is ITyClass) ret = ret.union(it)
     }
 
     // xxx.new()

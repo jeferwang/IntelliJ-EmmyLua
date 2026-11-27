@@ -123,6 +123,28 @@ class TyUnion : Ty(TyKind.Union) {
             return if (u.childSet.size == 1) u.childSet.first() else u
         }
 
+        fun unionAll(types: Collection<ITy>): ITy {
+            var single: ITy? = null
+            var union: TyUnion? = null
+            for (ty in types) {
+                if (isInvalid(ty)) continue
+                if (union != null) {
+                    union.append(ty)
+                } else if (single == null) {
+                    single = ty
+                } else if (single != ty) {
+                    if (single is TyUnion && ty !is TyUnion && ty in single.childSet) continue
+                    union = TyUnion().append(single).append(ty)
+                    single = null
+                }
+            }
+            return when {
+                union != null -> if (union.size == 1) union.childSet.first() else union
+                single != null -> single
+                else -> UNKNOWN
+            }
+        }
+
         fun getPerfectClass(ty: ITy): ITyClass? {
             var clazz: ITyClass? = null
             var anonymous: ITyClass? = null

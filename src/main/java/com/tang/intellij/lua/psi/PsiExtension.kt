@@ -160,21 +160,51 @@ private fun LuaExpr.shouldBeInternal(context: SearchContext): ITy {
 
 internal enum class StandardTableCall { INSERT, SET_METATABLE }
 
+private val KEY_LOCAL_REASSIGNED = Key.create<CachedValue<Boolean>>("lua.local_reassigned")
+
+private fun isLocalReassigned(local: LuaNameDef, owner: LuaLocalDef): Boolean {
+    val file = local.containingFile
+    if (file is LuaPsiFile && !file.isContentsLoaded) return true
+    val scope: PsiElement = PsiTreeUtil.getStubOrPsiParentOfType(owner, LuaDeclarationScope::class.java) ?: file
+    return CachedValuesManager.getCachedValue(local, KEY_LOCAL_REASSIGNED) {
+        val name = local.name
+        var reassigned = false
+        PsiTreeUtil.processElements(scope) { element ->
+            if (element is LuaAssignStat) {
+                for (lhs in element.varExprList.exprList) {
+                    if (lhs is LuaNameExpr && lhs.name == name && resolveLocal(lhs) == local) {
+                        reassigned = true
+                        return@processElements false
+                    }
+                }
+            }
+            true
+        }
+        CachedValueProvider.Result.create(reassigned, scope)
+    }
+}
+
 internal fun LuaCallExpr.standardTableCall(): StandardTableCall? {
     if (isMethodColonCall) return null
     var callee = expr
     if (callee is LuaNameExpr) {
-        val local = resolveLocal(callee)
+        val local = resolveInFile(callee.name, callee, null)
         if (local == null) return if (callee.name == "setmetatable") StandardTableCall.SET_METATABLE else null
         if (local !is LuaNameDef) return null
-        val owner = PsiTreeUtil.getStubOrPsiParentOfType(local, LuaLocalDef::class.java)
-        callee = owner?.getExprFor(local) ?: return null
-        if (callee is LuaNameExpr && callee.name == "setmetatable" && resolveLocal(callee) == null)
-            return StandardTableCall.SET_METATABLE
+        val owner = PsiTreeUtil.getStubOrPsiParentOfType(local, LuaLocalDef::class.java) ?: return null
+        var init = owner.getExprFor(local) ?: return null
+        while (init is LuaParenExpr) init = init.expr ?: return null
+        callee = init
+        if (callee is LuaNameExpr && callee.name == "setmetatable" && resolveInFile(callee.name, callee, null) == null)
+            return if (isLocalReassigned(local, owner)) null else StandardTableCall.SET_METATABLE
+        if (callee !is LuaIndexExpr || callee.colon != null || callee.name != "insert") return null
+        val prefix = callee.prefixExpr as? LuaNameExpr ?: return null
+        return if (prefix.name == "table" && resolveInFile(prefix.name, prefix, null) == null && !isLocalReassigned(local, owner))
+            StandardTableCall.INSERT else null
     }
     if (callee !is LuaIndexExpr || callee.colon != null || callee.name != "insert") return null
     val prefix = callee.prefixExpr as? LuaNameExpr ?: return null
-    return if (prefix.name == "table" && resolveLocal(prefix) == null) StandardTableCall.INSERT else null
+    return if (prefix.name == "table" && resolveInFile(prefix.name, prefix, null) == null) StandardTableCall.INSERT else null
 }
 
 internal fun resolveMetatableIndexType(mt: LuaExpr, context: SearchContext): ITy {
@@ -195,6 +225,34 @@ internal fun resolveMetatableIndexType(mt: LuaExpr, context: SearchContext): ITy
         }
     }
     return result
+}
+
+internal fun LuaCallExpr.selectCandidateSignatures(calleeTy: ITy): List<IFunSignature> {
+    val selected = mutableListOf<IFunSignature>()
+    var bestTier = Int.MAX_VALUE
+    val argCount = argList.size
+    val colon = isMethodColonCall
+    calleeTy.each { ty ->
+        if (ty is ITyFunction) ty.process { sig ->
+            val fixed = when {
+                colon && !sig.colonCall -> (sig.params.size - 1).coerceAtLeast(0)
+                !colon && sig.colonCall -> sig.params.size + 1
+                else -> sig.params.size
+            }
+            val tier = when {
+                argCount == fixed || (sig.hasVarargs() && argCount >= fixed) -> 0
+                argCount < fixed -> 1
+                else -> 2
+            }
+            if (tier < bestTier) {
+                bestTier = tier
+                selected.clear()
+            }
+            if (tier == bestTier) selected.add(sig)
+            true
+        }
+    }
+    return selected
 }
 
 private fun LuaCallExpr.expectedArgumentType(index: Int, context: SearchContext): ITy {
@@ -219,37 +277,16 @@ private fun LuaCallExpr.expectedArgumentType(index: Int, context: SearchContext)
         null -> Unit
     }
 
-    val selected = mutableListOf<IFunSignature>()
-    var bestTier = Int.MAX_VALUE
-    val colon = isMethodColonCall
-    expr.guessType(context).each { ty ->
-        if (ty is ITyFunction) ty.process { sig ->
-            val fixed = when {
-                colon && !sig.colonCall -> (sig.params.size - 1).coerceAtLeast(0)
-                !colon && sig.colonCall -> sig.params.size + 1
-                else -> sig.params.size
-            }
-            val tier = when {
-                args.size == fixed || (sig.hasVarargs() && args.size >= fixed) -> 0
-                args.size < fixed -> 1
-                else -> 2
-            }
-            if (tier < bestTier) {
-                bestTier = tier
-                selected.clear()
-            }
-            if (tier == bestTier) selected.add(sig)
-            true
-        }
-    }
+    val selected = selectCandidateSignatures(expr.guessType(context))
+    if (selected.isEmpty()) return Ty.UNKNOWN
     val self = TySelfSubstitutor(project, this)
-    var result: ITy = Ty.UNKNOWN
+    val results = ArrayList<ITy>(selected.size)
     for (sig in selected) {
         val param = sig.getParamTyEx(this, index)
         val generic = createSubstitutor(sig, context, excludeArgIndex = index)
-        result = result.union((generic?.let { param.substitute(it) } ?: param).substitute(self))
+        results.add((generic?.let { param.substitute(it) } ?: param).substitute(self))
     }
-    return result
+    return TyUnion.unionAll(results)
 }
 
 private fun hasConcreteExpectedType(ty: ITy): Boolean = when (ty) {
@@ -285,9 +322,9 @@ internal fun LuaExpr.leadingInlineDocTy(): ITy? {
 
 internal fun extractReturnSlot(ty: ITy, index: Int): ITy = when (ty) {
     is TyUnion -> {
-        var result: ITy = Ty.UNKNOWN
-        ty.each { result = result.union(extractReturnSlot(it, index)) }
-        result
+        val slots = ArrayList<ITy>(ty.size)
+        ty.each { slots.add(extractReturnSlot(it, index)) }
+        TyUnion.unionAll(slots)
     }
     is TyTuple -> ty.list.getOrNull(index) ?: Ty.UNKNOWN
     else -> if (index == 0) ty else Ty.UNKNOWN
@@ -411,28 +448,76 @@ fun LuaExprList.getExprAt(idx: Int): LuaExpr? {
     return exprStubList.getOrNull(idx)
 }
 
-fun LuaExprList.guessType(context: SearchContext):ITy {
-    val exprList = exprStubList
-    if (exprList.isEmpty()) return Ty.UNKNOWN
-    if (exprList.size == 1) {
-        val only = exprList.first()
-        return if (only is LuaParenExpr) context.withIndex(0) { only.guessType(context) }
-        else only.guessType(context)
+internal fun LuaExpr.isMultiReturnExpandable(): Boolean =
+    this is LuaCallExpr || (this is LuaLiteralExpr && kind == LuaLiteralKind.Varargs)
+
+internal fun adjustExprList(exprs: List<LuaExpr>, context: SearchContext, slot0Override: ITy? = null): ITy {
+    if (exprs.isEmpty()) return slot0Override ?: Ty.UNKNOWN
+    if (exprs.size == 1) {
+        val only = exprs[0]
+        if (slot0Override == null) {
+            return if (only.isMultiReturnExpandable()) only.guessType(context)
+            else context.withIndex(0) { only.guessType(context) }
+        }
+        if (!only.isMultiReturnExpandable()) return slot0Override
+        val full = context.withIndex(-1) { only.guessType(context) }
+        val arms = mutableListOf<ITy>()
+        TyUnion.each(full) { alt ->
+            if (alt is TyTuple && alt.list.size > 1) {
+                val replaced = ArrayList<ITy>(alt.list.size)
+                replaced.add(slot0Override)
+                for (j in 1 until alt.list.size) replaced.add(alt.list[j])
+                arms.add(TyTuple(replaced))
+            } else {
+                arms.add(slot0Override)
+            }
+        }
+        return if (arms.isEmpty()) slot0Override else TyUnion.unionAll(arms)
     }
-    val list = mutableListOf<ITy>()
-    val lastIndex = exprList.lastIndex
-    for (i in exprList.indices) {
-        val expr = exprList[i]
-        if (i < lastIndex) {
-            list.add(context.withIndex(0) { expr.guessType(context) })
+
+    val prefix = ArrayList<ITy>(exprs.size)
+    val lastIndex = exprs.lastIndex
+    for (i in 0 until lastIndex) {
+        if (i == 0 && slot0Override != null) {
+            prefix.add(slot0Override)
         } else {
-            val lastTy = if (expr is LuaParenExpr) context.withIndex(0) { expr.guessType(context) }
-            else context.withIndex(-1) { expr.guessType(context) }
-            if (lastTy is TyTuple) list.addAll(lastTy.list) else list.add(lastTy)
+            prefix.add(context.withIndex(0) { exprs[i].guessType(context) })
         }
     }
-    return TyTuple(list)
+    val last = exprs[lastIndex]
+    if (!last.isMultiReturnExpandable()) {
+        prefix.add(context.withIndex(0) { last.guessType(context) })
+        return TyTuple(prefix)
+    }
+    val lastTy = context.withIndex(-1) { last.guessType(context) }
+    if (lastTy is TyTuple) {
+        val merged = ArrayList<ITy>(prefix.size + lastTy.list.size)
+        merged.addAll(prefix)
+        merged.addAll(lastTy.list)
+        return TyTuple(merged)
+    }
+    if (lastTy is TyUnion && lastTy.getChildTypes().any { it is TyTuple }) {
+        val arms = ArrayList<ITy>(lastTy.size)
+        TyUnion.each(lastTy) { alt ->
+            if (alt is TyTuple) {
+                val merged = ArrayList<ITy>(prefix.size + alt.list.size)
+                merged.addAll(prefix)
+                merged.addAll(alt.list)
+                arms.add(TyTuple(merged))
+            } else {
+                val merged = ArrayList<ITy>(prefix.size + 1)
+                merged.addAll(prefix)
+                merged.add(alt)
+                arms.add(TyTuple(merged))
+            }
+        }
+        return TyUnion.unionAll(arms)
+    }
+    prefix.add(lastTy)
+    return TyTuple(prefix)
 }
+
+fun LuaExprList.guessType(context: SearchContext): ITy = adjustExprList(exprStubList, context)
 
 fun LuaParametersOwner.getIndexFor(paramNameDef: LuaParamNameDef): Int {
     val list = this.paramNameDefList
