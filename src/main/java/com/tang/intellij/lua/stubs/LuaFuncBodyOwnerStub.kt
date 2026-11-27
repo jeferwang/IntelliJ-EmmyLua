@@ -39,21 +39,16 @@ interface LuaFuncBodyOwnerStub<T : LuaFuncBodyOwner> : StubElement<T> {
         return recursionGuard(stub, Computable {
             val ty = when (psi) {
                 is LuaReturnStat -> {
-                    psi.exprList?.guessTypeAt(context)
+                    guessReturnType(psi, context.index, context)
                 }
+                is LuaFuncBody,
                 is LuaDoStat,
                 is LuaWhileStat,
                 is LuaIfStat,
                 is LuaForAStat,
                 is LuaForBStat,
                 is LuaRepeatStat -> {
-                    var ret: ITy? = null
-                    for (childrenStub in stub.childrenStubs) {
-                        ret = walkStub(childrenStub, context)
-                        if (ret != null)
-                            break
-                    }
-                    ret
+                    collectReturns(stub, context)
                 }
                 else -> null
             }
@@ -61,17 +56,20 @@ interface LuaFuncBodyOwnerStub<T : LuaFuncBodyOwner> : StubElement<T> {
         })
     }
 
+    private fun collectReturns(parent: StubElement<*>, context: SearchContext): ITy? {
+        var result: ITy? = null
+        for (child in parent.childrenStubs) {
+            val ty = walkStub(child, context) ?: continue
+            result = result?.union(ty) ?: ty
+        }
+        return result
+    }
+
     fun guessReturnTy(context: SearchContext): ITy {
         val docTy = returnDocTy
-        if (docTy != null){
-            if (docTy is TyTuple && context.index != -1) {
-                return docTy.list.getOrElse(context.index) { Ty.UNKNOWN }
-            }
-            return docTy
+        if (docTy != null) {
+            return if (context.guessTuple()) docTy else extractReturnSlot(docTy, context.index)
         }
-        childrenStubs
-                .mapNotNull { walkStub(it, context) }
-                .forEach { return it }
-        return Ty.VOID
+        return collectReturns(this, context) ?: Ty.VOID
     }
 }

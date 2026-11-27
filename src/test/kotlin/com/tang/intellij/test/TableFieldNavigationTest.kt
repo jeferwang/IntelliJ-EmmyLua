@@ -3,6 +3,63 @@ package com.tang.intellij.test
 import com.tang.intellij.lua.comment.psi.LuaDocTagField
 
 class TableFieldNavigationTest : LuaTestBase() {
+    private fun checkReturnFields(source: String) {
+        val declarations = myFixture.addFileToProject("Slots.lua", """
+            ---@class LoadoutSnapshotSlot
+            ---@field itemId number
+            LoadoutSnapshotSlot = {}
+        """.trimIndent())
+        val file = myFixture.configureByText("Returns.lua", source.trimIndent())
+        val offsets = Regex("\\bitemId\\b").findAll(file.text).map { it.range.first }.toList()
+        assertTrue(offsets.isNotEmpty())
+        for (offset in offsets) {
+            val target = file.findReferenceAt(offset)?.resolve() as? LuaDocTagField
+            assertEquals("field at offset $offset", declarations, target?.containingFile)
+            assertEquals(declarations.text.indexOf("itemId"), target?.textOffset)
+        }
+    }
+
+    fun testStatementReturnAnnotationsAndCaller() = checkReturnFields("""
+        local function make()
+            ---@type LoadoutSnapshotSlot
+            return { itemId = 1 }
+        end
+        local r = make()
+        local id = r.itemId
+        ---@type LoadoutSnapshotSlot
+        return { itemId = 1 }
+    """)
+
+    fun testDeclaredReturnSlotsAndSelf() = checkReturnFields("""
+        ---@return LoadoutSnapshotSlot
+        local function make() return { itemId = 1 } end
+        ---@return boolean, LoadoutSnapshotSlot
+        local function pair() return true, { itemId = 1 } end
+        local ok, slot = pair()
+        local id = slot.itemId
+        ---@return self
+        function LoadoutSnapshotSlot:copy() return { itemId = 1 } end
+    """)
+
+    fun testContextualClosureReturns() = checkReturnFields("""
+        ---@type fun(): LoadoutSnapshotSlot
+        local make = function() return { itemId = 1 } end
+        ---@param cb fun(): LoadoutSnapshotSlot
+        local function consume(cb) end
+        consume(function() return { itemId = 1 } end)
+    """)
+
+    fun testUnannotatedClosureReturnKeyRemainsADeclaration() {
+        val file = myFixture.configureByText("Closure.lua", """
+            local f = function() return { itemId = 1 } end
+            local r = f()
+            local id = r.itemId
+        """.trimIndent())
+        val key = file.text.indexOf("itemId")
+        assertNull(file.findReferenceAt(key)?.resolve())
+        assertEquals(key, file.findReferenceAt(file.text.lastIndexOf("itemId"))?.resolve()?.textOffset)
+    }
+
     fun testConstructorKeysResolveToFieldsOfTheAnnotatedClass() {
         val declarations = myFixture.addFileToProject("Slots.lua", """
             ---@class LoadoutSnapshotSlot

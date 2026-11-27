@@ -16,6 +16,7 @@
 
 package com.tang.intellij.lua.search
 
+import com.intellij.openapi.progress.ProcessCanceledException
 import com.intellij.openapi.project.DumbService
 import com.intellij.openapi.project.Project
 import com.intellij.psi.PsiElement
@@ -66,15 +67,17 @@ class SearchContext private constructor(val project: Project) {
                 val size = stack.size
                 stack.push(ctx)
                 ctx.myInStack = true
-                val result = try {
+                try {
                     action(ctx)
+                } catch (e: ProcessCanceledException) {
+                    throw e
                 } catch (e: Exception) {
                     defaultValue
+                } finally {
+                    ctx.myInStack = false
+                    stack.pop()
+                    assert(size == stack.size)
                 }
-                ctx.myInStack = false
-                stack.pop()
-                assert(size == stack.size)
-                result
             }
         }
 
@@ -95,10 +98,12 @@ class SearchContext private constructor(val project: Project) {
                 val stub = it.myForStub
                 it.myDumb = true
                 it.myForStub = true
-                val ret = action(it)
-                it.myDumb = dumb
-                it.myForStub = stub
-                ret
+                try {
+                    action(it)
+                } finally {
+                    it.myDumb = dumb
+                    it.myForStub = stub
+                }
             }
         }
 
@@ -118,15 +123,18 @@ class SearchContext private constructor(val project: Project) {
     private var myIndex = -1
     private var myInStack = false
     private val myGuardList = mutableListOf<InferRecursionGuard>()
-    private val myInferCache = mutableMapOf<LuaTypeGuessable, ITy>()
+    private data class CacheKey(val psi: LuaTypeGuessable, val index: Int)
+    private val myInferCache = mutableMapOf<CacheKey, ITy>()
     private var myScope: GlobalSearchScope? = null
 
     fun <T> withIndex(index: Int, action: () -> T): T {
         val savedIndex = this.index
         myIndex = index
-        val ret = action()
-        myIndex = savedIndex
-        return ret
+        return try {
+            action()
+        } finally {
+            myIndex = savedIndex
+        }
     }
 
     fun guessTuple() = index < 0
@@ -148,9 +156,11 @@ class SearchContext private constructor(val project: Project) {
     fun <T> withScope(scope: GlobalSearchScope, action: () -> T): T {
         val oriScope = myScope
         myScope = scope
-        val ret = action()
-        myScope = oriScope
-        return ret
+        return try {
+            action()
+        } finally {
+            myScope = oriScope
+        }
     }
 
     fun withRecursionGuard(psi: PsiElement, type: GuardType, action: () -> ITy): ITy {
@@ -162,23 +172,24 @@ class SearchContext private constructor(val project: Project) {
         val guard = createGuard(psi, type)
         if (guard != null)
             myGuardList.add(guard)
-        val result = action()
-        if (guard != null)
-            myGuardList.remove(guard)
-        return result
+        return try {
+            action()
+        } finally {
+            if (guard != null) myGuardList.remove(guard)
+        }
     }
 
     private fun inferAndCache(psi: LuaTypeGuessable): ITy {
         /*if (inferCache.containsKey(psi)) {
             println("use cache!!!")
         }*/
-        return myInferCache.getOrPut(psi) {
+        return myInferCache.getOrPut(CacheKey(psi, index)) {
             ILuaTypeInfer.infer(psi, this)
         }
     }
 
     fun getTypeFromCache(psi: LuaTypeGuessable): ITy {
-        return myInferCache.getOrElse(psi) { Ty.UNKNOWN }
+        return myInferCache[CacheKey(psi, index)] ?: Ty.UNKNOWN
     }
 
     fun invalidateInferCache() {

@@ -560,18 +560,23 @@ fun getName(nameExpr: LuaNameExpr): String {
 }
 
 fun guessReturnType(returnStat: LuaReturnStat?, index: Int, context: SearchContext): ITy {
-    if (returnStat != null) {
+    if (returnStat == null) return Ty.UNKNOWN
+    return context.withIndex(index) {
         val returnExpr = returnStat.exprList
-        if (returnExpr != null) {
-            return context.withIndex(index) {
-                if (context.guessTuple())
-                    returnExpr.guessType(context)
-                else
-                    returnExpr.guessTypeAt(context)
+        if (index <= 0 && !(context.forStub && returnStat.stub != null)) {
+            val docTy = returnStat.comment?.ty
+            if (docTy != null && !Ty.isInvalid(docTy)) {
+                if (index == 0) return@withIndex docTy
+                val exprs = returnExpr?.exprStubList.orEmpty()
+                if (exprs.size <= 1) return@withIndex docTy
+                return@withIndex TyTuple(exprs.mapIndexed { i, expr ->
+                    if (i == 0) docTy else expr.guessType(context)
+                })
             }
         }
+        if (context.guessTuple()) returnExpr?.guessType(context) ?: Ty.UNKNOWN
+        else returnExpr?.guessTypeAt(context) ?: Ty.UNKNOWN
     }
-    return Ty.UNKNOWN
 }
 
 fun getNameIdentifier(label: LuaLabelStat): PsiElement? {

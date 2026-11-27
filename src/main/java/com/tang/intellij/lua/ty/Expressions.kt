@@ -150,19 +150,11 @@ fun LuaCallExpr.createSubstitutor(sig: IFunSignature, context: SearchContext): I
     return null
 }
 
-private fun LuaCallExpr.getReturnTy(sig: IFunSignature, context: SearchContext): ITy? {
+private fun LuaCallExpr.getReturnTy(sig: IFunSignature, context: SearchContext): ITy {
     val substitutor = createSubstitutor(sig, context)
     var returnTy = if (substitutor != null) sig.returnTy.substitute(substitutor) else sig.returnTy
     returnTy = returnTy.substitute(TySelfSubstitutor(project, this))
-    return if (returnTy is TyTuple) {
-        if (context.guessTuple())
-            returnTy
-        else returnTy.list.getOrNull(context.index)
-    } else {
-        if (context.guessTuple() || context.index == 0)
-            returnTy
-        else null
-    }
+    return if (context.guessTuple()) returnTy else extractReturnSlot(returnTy, context.index)
 }
 
 private fun LuaCallExpr.infer(context: SearchContext): ITy {
@@ -191,10 +183,7 @@ private fun LuaCallExpr.infer(context: SearchContext): ITy {
         when (it) {
             is ITyFunction -> {
                 it.process(Processor { sig ->
-                    val targetTy = getReturnTy(sig, context)
-
-                    if (targetTy != null)
-                        ret = ret.union(targetTy)
+                    ret = ret.union(getReturnTy(sig, context))
                     true
                 })
             }

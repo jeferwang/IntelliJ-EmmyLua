@@ -18,6 +18,7 @@ package com.tang.intellij.lua.psi
 
 import com.intellij.extapi.psi.StubBasedPsiElementBase
 import com.intellij.openapi.progress.ProgressManager
+import com.intellij.openapi.util.Computable
 import com.intellij.openapi.util.Key
 import com.intellij.psi.PsiElement
 import com.intellij.psi.util.CachedValue
@@ -30,6 +31,7 @@ import com.tang.intellij.lua.comment.psi.LuaDocGenericDef
 import com.tang.intellij.lua.comment.psi.LuaDocTagClass
 import com.tang.intellij.lua.comment.psi.LuaDocTagOverload
 import com.tang.intellij.lua.comment.psi.api.LuaComment
+import com.tang.intellij.lua.ext.recursionGuard
 import com.tang.intellij.lua.lang.type.LuaString
 import com.tang.intellij.lua.psi.search.LuaShortNamesManager
 import com.tang.intellij.lua.search.SearchContext
@@ -75,6 +77,15 @@ private fun LuaExpr.shouldBeInternal(context: SearchContext): ITy {
             val receiver = p2.nameList?.nameDefList?.getOrNull(p1.exprStubList.indexOf(this))
             if (receiver != null)
                 return infer(receiver, context)
+        } else if (p2 is LuaReturnStat) {
+            val index = p1.exprStubList.indexOf(this)
+            if (index < 0) return Ty.UNKNOWN
+            if (index == 0) {
+                val docTy = p2.comment?.ty
+                if (docTy != null && !Ty.isInvalid(docTy)) return docTy
+            }
+            val owner = PsiTreeUtil.getParentOfType(p2, LuaFuncBodyOwner::class.java) ?: return Ty.UNKNOWN
+            return owner.expectedReturnSlot(index, context)
         }
     } else if (p1 is LuaArgs) {
         val p2 = p1.parent
@@ -112,10 +123,50 @@ private fun LuaExpr.shouldBeInternal(context: SearchContext): ITy {
     return Ty.UNKNOWN
 }
 
-fun LuaExpr.shouldBe(context: SearchContext): ITy {
-    val ty = shouldBeInternal(context)
-    return TyAliasSubstitutor.substitute(ty, context)
+internal fun extractReturnSlot(ty: ITy, index: Int): ITy = when (ty) {
+    is TyUnion -> {
+        var result: ITy = Ty.UNKNOWN
+        ty.each { result = result.union(extractReturnSlot(it, index)) }
+        result
+    }
+    is TyTuple -> ty.list.getOrNull(index) ?: Ty.UNKNOWN
+    else -> if (index == 0) ty else Ty.UNKNOWN
 }
+
+private fun LuaFuncBodyOwner.expectedReturnSlot(index: Int, context: SearchContext): ITy {
+    var declared = (this as? LuaCommentOwner)?.comment?.tagReturn?.type
+    if (this is LuaClassMethodDef) {
+        if (declared == null) {
+            val method = findOverridingMethod(context)
+            val stub = (method as? StubBasedPsiElementBase<*>)?.stub as? LuaFuncBodyOwnerStub<*>
+            declared = stub?.returnDocTy ?: (method as? LuaCommentOwner)?.comment?.tagReturn?.type
+        }
+        declared = declared?.substitute(TySelfSubstitutor(project, null, guessClassType(context)))
+    }
+    if (declared != null) return extractReturnSlot(declared, index)
+    if (this !is LuaClosureExpr) return Ty.UNKNOWN
+
+    var result: ITy = Ty.UNKNOWN
+    shouldBe(context).each { ty ->
+        if (ty is ITyFunction && !(ty is TyPsiFunction && ty.psi == this)) {
+            ty.process { signature ->
+                result = result.union(extractReturnSlot(signature.returnTy, index))
+                true
+            }
+        }
+    }
+    return result
+}
+
+fun LuaExpr.shouldBe(context: SearchContext): ITy = recursionGuard(this, Computable {
+    val ty = shouldBeInternal(context)
+    if (this is LuaClosureExpr) {
+        // Expanding function aliases evaluates lazy return signatures. Drop the initializer itself first.
+        var expected: ITy = Ty.UNKNOWN
+        ty.each { if (!(it is TyPsiFunction && it.psi == this)) expected = expected.union(it) }
+        TyAliasSubstitutor.substitute(expected, context)
+    } else TyAliasSubstitutor.substitute(ty, context)
+}) ?: Ty.UNKNOWN
 
 /**
  * 获取所在的位置
@@ -150,7 +201,7 @@ val LuaNameDef.docTy: ITy? get() {
 
 fun LuaAssignStat.getIndexFor(psi: LuaExpr): Int {
     var idx = 0
-    val stub = valueExprList?.stub
+    val stub = varExprList.stub
     if (stub != null) {
         val children = stub.childrenStubs
         for (i in 0 until children.size) {
