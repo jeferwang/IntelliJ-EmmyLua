@@ -26,6 +26,7 @@ import com.tang.intellij.lua.search.SearchContext
 import com.tang.intellij.lua.ty.ITy
 import com.tang.intellij.lua.ty.Ty
 import com.tang.intellij.lua.ty.TyTuple
+import com.tang.intellij.lua.ty.TyUnion
 
 class ReturnTypeInspection : StrictInspection() {
     override fun buildVisitor(myHolder: ProblemsHolder, isOnTheFly: Boolean, session: LocalInspectionToolSession): PsiElementVisitor =
@@ -44,31 +45,47 @@ class ReturnTypeInspection : StrictInspection() {
                         returnDef?.type
                     }
                     val concreteType = guessReturnType(o, -1, context)
-                    var abstractTypes = toList(abstractType)
-                    val concreteTypes = toList(concreteType)
+                    val baseAbstract = toList(abstractType)
+                    val concreteAlternatives = toAlternatives(concreteType)
 
-                    // Extend expected types with nil until the same amount as given types
-                    if (abstractTypes.size < concreteTypes.size) {
-                        abstractTypes += List(concreteTypes.size - abstractTypes.size) { Ty.UNKNOWN }
-                    }
-
-                    // Check number
-                    if (abstractTypes.size > concreteTypes.size) {
-                        if (concreteTypes.isEmpty()) {
-                            myHolder.registerProblem(o.lastChild, "Type mismatch. Expected: '%s' Found: 'nil'".format(abstractTypes[0]))
-                        } else {
-                            myHolder.registerProblem(o.lastChild, "Incorrect number of return values. Expected %s but found %s.".format(abstractTypes.size, concreteTypes.size))
+                    for (concreteTypes in concreteAlternatives) {
+                        var abstractTypes = baseAbstract
+                        // Extend expected types with nil until the same amount as given types
+                        if (abstractTypes.size < concreteTypes.size) {
+                            abstractTypes += List(concreteTypes.size - abstractTypes.size) { Ty.UNKNOWN }
                         }
-                    } else {
-                        for (i in 0 until concreteTypes.size) {
-                            if (!concreteTypes[i].subTypeOf(abstractTypes[i], context, false)) {
-                                val abstractString = abstractTypes.joinToString(", ") { it.displayName }
-                                val concreteString = concreteTypes.joinToString(", ") { it.displayName }
-                                myHolder.registerProblem(o, "Type mismatch. Expected: '$abstractString' Found: '$concreteString'")
-                                break
+
+                        // Check number
+                        if (abstractTypes.size > concreteTypes.size) {
+                            if (concreteTypes.isEmpty()) {
+                                myHolder.registerProblem(o.lastChild, "Type mismatch. Expected: '%s' Found: 'nil'".format(abstractTypes[0]))
+                            } else {
+                                myHolder.registerProblem(o.lastChild, "Incorrect number of return values. Expected %s but found %s.".format(abstractTypes.size, concreteTypes.size))
                             }
+                            break
+                        } else {
+                            var mismatched = false
+                            for (i in 0 until concreteTypes.size) {
+                                if (!concreteTypes[i].subTypeOf(abstractTypes[i], context, false)) {
+                                    val abstractString = abstractTypes.joinToString(", ") { it.displayName }
+                                    val concreteString = concreteTypes.joinToString(", ") { it.displayName }
+                                    myHolder.registerProblem(o, "Type mismatch. Expected: '$abstractString' Found: '$concreteString'")
+                                    mismatched = true
+                                    break
+                                }
+                            }
+                            if (mismatched) break
                         }
                     }
+                }
+
+                private fun toAlternatives(type: ITy?): List<List<ITy>> {
+                    if (type is TyUnion && type.getChildTypes().any { it is TyTuple }) {
+                        val list = ArrayList<List<ITy>>(type.size)
+                        TyUnion.each(type) { arm -> list.add(toList(arm)) }
+                        return list
+                    }
+                    return listOf(toList(type))
                 }
 
                 private fun toList(type: ITy?): List<ITy> {

@@ -126,8 +126,28 @@ fun LuaCallExpr.createSubstitutor(sig: IFunSignature, context: SearchContext, ex
                 list.add(prefix.guessType(context))
             }
         }
-        argList.forEachIndexed { index, arg ->
-            list.add(if (index == excludeArgIndex) null else arg.guessType(context))
+        val args = argList
+        args.forEachIndexed { index, arg ->
+            if (index == excludeArgIndex) {
+                list.add(null)
+            } else if (index == args.lastIndex && arg.isMultiReturnExpandable()) {
+                val lastTy = context.withIndex(-1) { arg.guessType(context) }
+                if (lastTy is TyTuple) {
+                    list.addAll(lastTy.list)
+                } else if (lastTy is TyUnion && lastTy.getChildTypes().any { it is TyTuple }) {
+                    var maxLen = 1
+                    TyUnion.each(lastTy) { arm ->
+                        if (arm is TyTuple && arm.list.size > maxLen) maxLen = arm.list.size
+                    }
+                    for (slot in 0 until maxLen) {
+                        list.add(extractReturnSlot(lastTy, slot))
+                    }
+                } else {
+                    list.add(lastTy)
+                }
+            } else {
+                list.add(context.withIndex(0) { arg.guessType(context) })
+            }
         }
         val map = mutableMapOf<String, ITy>()
         var processedIndex = if (sig.colonCall) 0 else -1
@@ -265,7 +285,7 @@ private fun LuaCallExpr.infer(context: SearchContext): ITy {
         }
     }
     val ty = TyAliasSubstitutor.substitute(infer(expr, context), context)
-    val selected = selectCandidateSignatures(ty)
+    val selected = selectCandidateSignatures(ty, context)
     if (selected.isNotEmpty()) {
         val retTypes = ArrayList<ITy>(selected.size)
         for (sig in selected) {

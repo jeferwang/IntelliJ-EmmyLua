@@ -291,7 +291,7 @@ internal fun resolveMetatableIndexType(mt: LuaExpr, context: SearchContext): ITy
     return result
 }
 
-internal fun selectSignaturesByArity(calleeTy: ITy, argCount: Int, colon: Boolean): List<IFunSignature> {
+internal fun selectSignaturesByArity(calleeTy: ITy, argCounts: IntArray, colon: Boolean): List<IFunSignature> {
     val selected = mutableListOf<IFunSignature>()
     var bestTier = Int.MAX_VALUE
     calleeTy.each { ty ->
@@ -301,10 +301,15 @@ internal fun selectSignaturesByArity(calleeTy: ITy, argCount: Int, colon: Boolea
                 !colon && sig.colonCall -> sig.params.size + 1
                 else -> sig.params.size
             }
-            val tier = when {
-                argCount == fixed || (sig.hasVarargs() && argCount >= fixed) -> 0
-                argCount < fixed -> 1
-                else -> 2
+            var tier = 2
+            for (argCount in argCounts) {
+                val t = when {
+                    argCount == fixed || (sig.hasVarargs() && argCount >= fixed) -> 0
+                    argCount < fixed -> 1
+                    else -> 2
+                }
+                if (t < tier) tier = t
+                if (tier == 0) break
             }
             if (tier < bestTier) {
                 bestTier = tier
@@ -317,8 +322,29 @@ internal fun selectSignaturesByArity(calleeTy: ITy, argCount: Int, colon: Boolea
     return selected
 }
 
-internal fun LuaCallExpr.selectCandidateSignatures(calleeTy: ITy): List<IFunSignature> =
-    selectSignaturesByArity(calleeTy, argList.size, isMethodColonCall)
+internal fun selectSignaturesByArity(calleeTy: ITy, argCount: Int, colon: Boolean): List<IFunSignature> =
+    selectSignaturesByArity(calleeTy, intArrayOf(argCount), colon)
+
+internal fun LuaCallExpr.effectiveArgCounts(context: SearchContext, excludeArgIndex: Int = -1): IntArray {
+    val args = argList
+    if (args.isEmpty()) return intArrayOf(0)
+    val last = args.last()
+    if (args.lastIndex == excludeArgIndex || !last.isMultiReturnExpandable()) {
+        return intArrayOf(args.size)
+    }
+    val lastTy = context.withIndex(-1) { last.guessType(context) }
+    val counts = LinkedHashSet<Int>(2)
+    TyUnion.each(lastTy) { arm ->
+        if (arm is TyTuple) counts.add(args.size - 1 + arm.list.size)
+        else counts.add(args.size)
+    }
+    return if (counts.isEmpty()) intArrayOf(args.size) else counts.toIntArray()
+}
+
+internal fun LuaCallExpr.selectCandidateSignatures(calleeTy: ITy, context: SearchContext? = null, excludeArgIndex: Int = -1): List<IFunSignature> {
+    val counts = if (context != null) effectiveArgCounts(context, excludeArgIndex) else intArrayOf(argList.size)
+    return selectSignaturesByArity(calleeTy, counts, isMethodColonCall)
+}
 
 internal fun resolveRawTableFieldType(tblExpr: LuaExpr, keyExpr: LuaExpr, context: SearchContext): ITy {
     val tblTy = TyAliasSubstitutor.substitute(context.withIndex(0) { tblExpr.guessType(context) }, context)
@@ -435,7 +461,7 @@ private fun LuaCallExpr.expectedArgumentType(index: Int, context: SearchContext)
         }
     }
 
-    val selected = selectCandidateSignatures(expr.guessType(context))
+    val selected = selectCandidateSignatures(expr.guessType(context), context, excludeArgIndex = index)
     if (selected.isEmpty()) return Ty.UNKNOWN
     val self = TySelfSubstitutor(project, this)
     val results = ArrayList<ITy>(selected.size)

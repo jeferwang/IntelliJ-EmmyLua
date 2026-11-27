@@ -796,4 +796,54 @@ class TableFieldNavigationTest : LuaTestBase() {
         assertEquals(itemIdDecl, file.findReferenceAt(file.text.indexOf("u2.itemId") + 3)?.resolve())
         assertEquals(itemIdDecl, file.findReferenceAt(file.text.indexOf("picked.itemId") + 7)?.resolve())
     }
+
+    fun testExpandableLastArgumentOverloadAndGenericSelection() {
+        val declarations = myFixture.addFileToProject("ExpandDecls.lua", """
+            ---@class ResultA
+            ---@field onlyA number
+            local ResultA = {}
+
+            ---@class ResultB
+            ---@field onlyB string
+            local ResultB = {}
+
+            ---@class SlotA
+            ---@field itemId number
+            local SlotA = {}
+        """.trimIndent())
+        val file = myFixture.configureByText("ExpandUsage.lua", """
+            ---@return number, SlotA
+            local function pair() end
+
+            ---@overload fun(n: number, s: SlotA): ResultB
+            ---@param a number
+            ---@return ResultA
+            local function pick(a) end
+
+            local expanded = pick(pair())
+            local b1 = expanded.onlyB
+            local a1 = expanded.onlyA
+
+            local truncated = pick((pair()))
+            local a2 = truncated.onlyA
+            local b2 = truncated.onlyB
+
+            ---@generic K, V
+            ---@param k K
+            ---@param v V
+            ---@return V
+            local function second(k, v) end
+            local g = second(pair())
+            local gid = g.itemId
+        """.trimIndent())
+        val onlyADecl = declarations.findElementAt(declarations.text.indexOf("onlyA number"))!!.parent
+        val onlyBDecl = declarations.findElementAt(declarations.text.indexOf("onlyB string"))!!.parent
+        val itemIdDecl = declarations.findElementAt(declarations.text.indexOf("itemId number"))!!.parent
+
+        assertEquals(onlyBDecl, file.findReferenceAt(file.text.indexOf("expanded.onlyB") + 9)?.resolve())
+        assertNull(file.findReferenceAt(file.text.indexOf("expanded.onlyA") + 9)?.resolve())
+        assertEquals(onlyADecl, file.findReferenceAt(file.text.indexOf("truncated.onlyA") + 10)?.resolve())
+        assertNull(file.findReferenceAt(file.text.indexOf("truncated.onlyB") + 10)?.resolve())
+        assertEquals(itemIdDecl, file.findReferenceAt(file.text.indexOf("g.itemId") + 2)?.resolve())
+    }
 }
