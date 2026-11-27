@@ -16,6 +16,10 @@
 
 package com.tang.intellij.lua.lang.type
 
+import java.nio.ByteBuffer
+import java.nio.charset.CharacterCodingException
+import java.nio.charset.CodingErrorAction
+import java.nio.charset.StandardCharsets
 import java.util.regex.Pattern
 
 /**
@@ -62,9 +66,8 @@ class LuaString {
             return content
         }
 
-        fun decode(rawText: String, content: LuaString = getContent(rawText)): String {
+        fun decodeOrNull(rawText: String, content: LuaString = getContent(rawText)): String? {
             val raw = content.value
-            if (raw.isEmpty()) return raw
             if (rawText.startsWith("[")) {
                 return when {
                     raw.startsWith("\r\n") -> raw.substring(2)
@@ -72,79 +75,95 @@ class LuaString {
                     else -> raw
                 }
             }
+            if (rawText.length < 2 || rawText.first() != rawText.last()) return null
             if ('\\' !in raw) return raw
-            val sb = StringBuilder(raw.length)
-            var i = 0
-            val len = raw.length
-            while (i < len) {
-                val ch = raw[i]
-                if (ch != '\\' || i + 1 >= len) {
-                    sb.append(ch)
-                    i++
-                    continue
-                }
-                i++
-                when (val esc = raw[i++]) {
-                    'a' -> sb.append('\u0007')
-                    'b' -> sb.append('\b')
-                    'f' -> sb.append('\u000C')
-                    'n' -> sb.append('\n')
-                    'r' -> sb.append('\r')
-                    't' -> sb.append('\t')
-                    'v' -> sb.append('\u000B')
-                    '\\', '"', '\'' -> sb.append(esc)
-                    '\n' -> sb.append('\n')
-                    '\r' -> {
-                        if (i < len && raw[i] == '\n') i++
-                        sb.append('\n')
-                    }
-                    'z' -> {
-                        while (i < len && raw[i] in " \t\n\r\u000B\u000C") i++
-                    }
-                    'x' -> {
-                        if (i + 1 < len) {
-                            val h1 = Character.digit(raw[i], 16)
-                            val h2 = Character.digit(raw[i + 1], 16)
-                            if (h1 >= 0 && h2 >= 0) {
-                                sb.append(((h1 shl 4) or h2).toChar())
-                                i += 2
-                            } else {
-                                sb.append('x')
-                            }
-                        } else {
-                            sb.append('x')
-                        }
-                    }
-                    'u' -> {
-                        if (i < len && raw[i] == '{') {
-                            val close = raw.indexOf('}', i + 1)
-                            if (close > i + 1) {
-                                val cp = raw.substring(i + 1, close).toIntOrNull(16)
-                                if (cp != null && Character.isValidCodePoint(cp)) {
-                                    sb.appendCodePoint(cp)
-                                    i = close + 1
-                                    continue
-                                }
-                            }
-                        }
-                        sb.append('u')
-                    }
-                    in '0'..'9' -> {
-                        var value = esc - '0'
-                        var digits = 1
-                        while (digits < 3 && i < len && raw[i] in '0'..'9') {
-                            value = value * 10 + (raw[i] - '0')
-                            i++
-                            digits++
-                        }
-                        if (value in 0..255) {
-                            sb.append(value.toChar())
-                        }
-                    }
-                    else -> sb.append(esc)
+            val result = StringBuilder(raw.length)
+            var bytes: ByteArray? = null
+            var size = 0
+            val decoder by lazy(LazyThreadSafetyMode.NONE) {
+                StandardCharsets.UTF_8.newDecoder().onMalformedInput(CodingErrorAction.REPORT)
+                    .onUnmappableCharacter(CodingErrorAction.REPORT)
+            }
+            fun flush(): Boolean {
+                if (size == 0) return true
+                return try {
+                    result.append(decoder.decode(ByteBuffer.wrap(bytes!!, 0, size)))
+                    size = 0
+                    true
+                } catch (_: CharacterCodingException) {
+                    false
                 }
             }
-            return sb.toString()
+
+            var i = 0
+            while (i < raw.length) {
+                val ch = raw[i++]
+                if (ch != '\\') {
+                    if (!flush()) return null
+                    result.append(ch)
+                    continue
+                }
+                if (i == raw.length) return null
+                val esc = raw[i++]
+                if (esc == 'x' || esc in '0'..'9') {
+                    val value: Int
+                    if (esc == 'x') {
+                        if (i + 2 > raw.length) return null
+                        val hi = hexDigit(raw[i++])
+                        val lo = hexDigit(raw[i++])
+                        if (hi < 0 || lo < 0) return null
+                        value = hi * 16 + lo
+                    } else {
+                        var decimal = esc - '0'
+                        val end = minOf(i + 2, raw.length)
+                        while (i < end && raw[i] in '0'..'9') decimal = decimal * 10 + (raw[i++] - '0')
+                        if (decimal > 255) return null
+                        value = decimal
+                    }
+                    val buffer = bytes ?: ByteArray(raw.length / 2).also { bytes = it }
+                    buffer[size++] = value.toByte()
+                    continue
+                }
+                if (!flush()) return null
+                when (esc) {
+                    'a' -> result.append('\u0007')
+                    'b' -> result.append('\b')
+                    'f' -> result.append('\u000c')
+                    'n' -> result.append('\n')
+                    'r' -> result.append('\r')
+                    't' -> result.append('\t')
+                    'v' -> result.append('\u000b')
+                    '\\', '"', '\'' -> result.append(esc)
+                    '\r', '\n' -> {
+                        if (i < raw.length && raw[i] == (if (esc == '\r') '\n' else '\r')) i++
+                        result.append('\n')
+                    }
+                    'z' -> while (i < raw.length && raw[i] in " \t\n\r\u000b\u000c") i++
+                    'u' -> {
+                        if (i >= raw.length || raw[i++] != '{') return null
+                        val start = i
+                        var cp = 0
+                        while (i < raw.length && raw[i] != '}') {
+                            val digit = hexDigit(raw[i++])
+                            if (digit < 0) return null
+                            cp = cp * 16 + digit
+                            if (cp > Character.MAX_CODE_POINT) return null
+                        }
+                        if (i == start || i == raw.length || cp in 0xd800..0xdfff) return null
+                        i++
+                        result.appendCodePoint(cp)
+                    }
+                    else -> return null
+                }
+            }
+            return if (flush()) result.toString() else null
+        }
+
+        private fun hexDigit(ch: Char): Int = when (ch) {
+            in '0'..'9' -> ch - '0'
+            in 'a'..'f' -> ch - 'a' + 10
+            in 'A'..'F' -> ch - 'A' + 10
+            else -> -1
         }
     }
 }

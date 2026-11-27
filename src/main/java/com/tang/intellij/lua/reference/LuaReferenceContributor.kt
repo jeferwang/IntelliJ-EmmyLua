@@ -19,6 +19,8 @@ package com.tang.intellij.lua.reference
 import com.intellij.patterns.PlatformPatterns.psiElement
 import com.intellij.psi.*
 import com.intellij.util.ProcessingContext
+import com.intellij.openapi.util.TextRange
+import com.tang.intellij.lua.lang.type.LuaString
 import com.tang.intellij.lua.project.LuaSettings
 import com.tang.intellij.lua.psi.*
 
@@ -78,9 +80,13 @@ class LuaReferenceContributor : PsiReferenceContributor() {
                 return arrayOf(LuaIndexReference(indexExpr, id))
             }
             val idExpr = indexExpr.idExpr
-            return if (idExpr != null) {
-                arrayOf(LuaIndexBracketReference(indexExpr, idExpr))
-            } else PsiReference.EMPTY_ARRAY
+            if (idExpr == null) return PsiReference.EMPTY_ARRAY
+            val text = idExpr.text
+            val content = LuaString.getContent(text)
+            val name = LuaString.decodeOrNull(text, content)
+            if (name.isNullOrEmpty()) return PsiReference.EMPTY_ARRAY
+            val range = TextRange.from(idExpr.startOffsetInParent + content.start, content.length)
+            return arrayOf(LuaIndexBracketReference(indexExpr, name, range))
         }
     }
 

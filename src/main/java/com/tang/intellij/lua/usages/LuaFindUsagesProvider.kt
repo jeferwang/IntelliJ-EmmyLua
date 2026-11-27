@@ -39,16 +39,18 @@ internal class LuaWordsScanner : DefaultWordsScanner(
         LuaParserDefinition.COMMENTS,
         LuaParserDefinition.STRINGS
 ) {
-    override fun getVersion(): Int = super.getVersion() + 1
+    override fun getVersion(): Int = super.getVersion() + 2
 
     override fun processWords(fileText: CharSequence, processor: Processor<in WordOccurrence>) {
         super.processWords(fileText, processor)
-        if (fileText.indexOf('\\') < 0) return
+        if (fileText.indexOf('\\') < 0 || fileText.indexOf('[') < 0) return
 
         val lexer = LuaLexerAdapter()
         lexer.start(fileText)
+        var afterBracket = false
         while (lexer.tokenType != null) {
-            if (lexer.tokenType == LuaTypes.STRING) {
+            val token = lexer.tokenType
+            if (afterBracket && token == LuaTypes.STRING) {
                 val start = lexer.tokenStart
                 val end = lexer.tokenEnd
                 if (end - start >= 4 && (fileText[start] == '"' || fileText[start] == '\'')) {
@@ -62,8 +64,8 @@ internal class LuaWordsScanner : DefaultWordsScanner(
                     if (hasEscape) {
                         val rawText = fileText.subSequence(start, end).toString()
                         val content = LuaString.getContent(rawText)
-                        val decoded = LuaString.decode(rawText, content)
-                        if (decoded.isNotEmpty() && decoded != content.value) {
+                        val decoded = LuaString.decodeOrNull(rawText, content)
+                        if (!decoded.isNullOrEmpty() && decoded != content.value) {
                             val key = "$ESCAPED_STRING_KEY_PREFIX$decoded"
                             if (!processor.process(WordOccurrence(key, 0, key.length, WordOccurrence.Kind.LITERALS))) {
                                 return
@@ -72,6 +74,8 @@ internal class LuaWordsScanner : DefaultWordsScanner(
                     }
                 }
             }
+            if (token !in LuaParserDefinition.WHITE_SPACES && token !in LuaParserDefinition.COMMENTS)
+                afterBracket = token == LuaTypes.LBRACK
             lexer.advance()
         }
     }

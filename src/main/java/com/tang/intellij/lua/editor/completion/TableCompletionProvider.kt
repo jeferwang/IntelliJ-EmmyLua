@@ -22,6 +22,8 @@ import com.intellij.codeInsight.lookup.LookupElementBuilder
 import com.intellij.psi.util.PsiTreeUtil
 import com.intellij.util.Processor
 import com.tang.intellij.lua.lang.LuaIcons
+import com.tang.intellij.lua.lang.LuaLanguageLevel
+import com.tang.intellij.lua.project.LuaSettings
 import com.tang.intellij.lua.psi.LuaClassField
 import com.tang.intellij.lua.psi.LuaClassMember
 import com.tang.intellij.lua.psi.LuaNameExpr
@@ -59,17 +61,19 @@ class TableCompletionProvider : ClassMemberCompletionProvider() {
 
         private val luaKeywords = setOf(
                 "and", "break", "do", "else", "elseif", "end", "false", "for", "function",
-                "goto", "if", "in", "local", "nil", "not", "or", "repeat", "return",
+                "if", "in", "local", "nil", "not", "or", "repeat", "return",
                 "then", "true", "until", "while"
         )
 
-        internal fun isValidLuaBareKey(name: String): Boolean {
-            if (name.isEmpty() || name in luaKeywords) return false
-            val first = name[0]
-            if (first !in 'a'..'z' && first !in 'A'..'Z' && first != '_') return false
+        private fun isKeyStart(ch: Char): Boolean =
+            ch in 'a'..'z' || ch in 'A'..'Z' || ch == '_' || ch >= '\u00ff'
+
+        internal fun isValidLuaBareKey(name: String, languageLevel: LuaLanguageLevel = LuaSettings.instance.languageLevel): Boolean {
+            if (name.isEmpty() || !isKeyStart(name[0]) || name in luaKeywords) return false
+            if (name == "goto" && languageLevel >= LuaLanguageLevel.LUA52) return false
             for (i in 1 until name.length) {
                 val ch = name[i]
-                if (ch !in 'a'..'z' && ch !in 'A'..'Z' && ch !in '0'..'9' && ch != '_') return false
+                if (!isKeyStart(ch) && ch !in '0'..'9') return false
             }
             return true
         }

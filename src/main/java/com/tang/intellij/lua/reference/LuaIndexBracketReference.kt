@@ -18,56 +18,46 @@ package com.tang.intellij.lua.reference
 
 import com.intellij.openapi.util.TextRange
 import com.intellij.psi.PsiElement
-import com.intellij.psi.PsiReferenceBase
-import com.intellij.util.IncorrectOperationException
-import com.tang.intellij.lua.lang.type.LuaString
-import com.tang.intellij.lua.psi.LuaElementFactory
+import com.intellij.psi.PsiElementResolveResult
+import com.intellij.psi.PsiPolyVariantReferenceBase
+import com.intellij.psi.ResolveResult
+import com.tang.intellij.lua.psi.LuaClassMember
+import com.tang.intellij.lua.psi.LuaDeclarationTree
 import com.tang.intellij.lua.psi.LuaIndexExpr
-import com.tang.intellij.lua.psi.LuaLiteralExpr
-import com.tang.intellij.lua.psi.resolve
 import com.tang.intellij.lua.search.SearchContext
+import com.tang.intellij.lua.ty.isAnonymous
+import com.tang.intellij.lua.ty.isGlobal
 
-class LuaIndexBracketReference internal constructor(element: LuaIndexExpr, private val id: LuaLiteralExpr)
-    : PsiReferenceBase<LuaIndexExpr>(element), LuaReference {
+class LuaIndexBracketReference internal constructor(element: LuaIndexExpr, private val name: String, range: TextRange)
+    : PsiPolyVariantReferenceBase<LuaIndexExpr>(element, range, true), LuaReference {
 
-    private val content:LuaString = LuaString.getContent(id.text)
+    override fun multiResolve(incompleteCode: Boolean): Array<ResolveResult> =
+        targets(SearchContext.get(myElement.project)).map(::PsiElementResolveResult).toTypedArray()
 
-    override fun getRangeInElement(): TextRange {
-        var start = id.node.startOffset - myElement.node.startOffset
-        start += content.start
-        return TextRange(start, start + content.length)
-    }
-
-    @Throws(IncorrectOperationException::class)
-    override fun handleElementRename(newElementName: String): PsiElement {
-        val text = id.text
-        val newText = text.substring(0, content.start) + newElementName + text.substring(content.end)
-        val newId = LuaElementFactory.createLiteral(myElement.project, newText)
-        id.replace(newId)
-        return newId
-    }
-
-    override fun isReferenceTo(element: PsiElement): Boolean {
-        return myElement.manager.areElementsEquivalent(resolve(), element)
-    }
-
-    override fun resolve(): PsiElement? {
-        return resolve(SearchContext.get(myElement.project))
-    }
-
-    override fun resolve(context: SearchContext): PsiElement? {
-        val ref = resolve(myElement, content.value, context)
-        if (ref != null) {
-            if (ref.containingFile == myElement.containingFile) { //优化，不要去解析 Node Tree
-                if (ref.node.textRange == myElement.node.textRange) {
-                    return null//自己引用自己
-                }
-            }
+    private fun targets(context: SearchContext): List<PsiElement> {
+        if (context.isDumb) return emptyList()
+        val manager = myElement.manager
+        val namedTargets = mutableListOf<PsiElement>()
+        val fallbackTargets = mutableListOf<PsiElement>()
+        fun addTo(list: MutableList<PsiElement>, candidate: PsiElement?) {
+            if (candidate == null || manager.areElementsEquivalent(candidate, myElement)) return
+            if (candidate.containingFile == myElement.containingFile.originalFile && candidate.textRange == myElement.textRange) return
+            if (list.none { manager.areElementsEquivalent(it, candidate) }) list.add(candidate)
         }
-        return ref
+        myElement.guessParentType(context).eachTopClass { cls ->
+            val targetList = if (!cls.isAnonymous && !cls.isGlobal) namedTargets else fallbackTargets
+            addTo(targetList, cls.findMember(name, context))
+            true
+        }
+        val targets = if (namedTargets.isNotEmpty()) namedTargets else fallbackTargets
+        if (targets.isEmpty()) addTo(targets, LuaDeclarationTree.get(myElement.containingFile).find(myElement)?.psi)
+        return targets
     }
 
-    override fun getVariants(): Array<Any> {
-        return arrayOf()
-    }
+    override fun resolve(context: SearchContext): PsiElement? = targets(context).singleOrNull()
+
+    override fun isReferenceTo(element: PsiElement): Boolean =
+        element is LuaClassMember && element.name == name && myElement.manager.areElementsEquivalent(resolve(), element)
+
+    override fun handleElementRename(newElementName: String): PsiElement = myElement.setName(newElementName)
 }

@@ -53,7 +53,7 @@ class LuaFileElementType : IStubFileElementType<LuaFileStub>(LuaLanguage.INSTANC
         return contents
     }
 
-    override fun getStubVersion(): Int = super.getStubVersion() + 2
+    override fun getStubVersion(): Int = super.getStubVersion() + 3
 
     override fun getBuilder(): StubBuilder {
         return object : DefaultStubBuilder() {

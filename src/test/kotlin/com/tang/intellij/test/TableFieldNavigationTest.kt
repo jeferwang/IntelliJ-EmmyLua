@@ -2,9 +2,45 @@ package com.tang.intellij.test
 
 import com.intellij.psi.PsiPolyVariantReference
 import com.tang.intellij.lua.comment.psi.LuaDocTagField
+import com.tang.intellij.lua.editor.completion.TableCompletionProvider
+import com.tang.intellij.lua.lang.LuaLanguageLevel
+import com.tang.intellij.lua.lang.type.LuaString
 import com.tang.intellij.lua.project.LuaSettings
 
 class TableFieldNavigationTest : LuaTestBase() {
+    fun testStaticKeyDecodingAndBareKeyLevels() {
+        fun decode(content: String) = LuaString.decodeOrNull("\"$content\"")
+        assertEquals("ÿ", decode("\\xC3\\191"))
+        assertEquals("a", decode("\\97"))
+        assertEquals("itemId", decode("\\105temId"))
+        for (invalid in listOf("\\xFF", "\\256", "\\xF", "\\u{}", "\\u{D800}", "\\u{110000}", "\\")) {
+            assertNull(invalid, decode(invalid))
+        }
+        assertTrue(TableCompletionProvider.isValidLuaBareKey("配置2", LuaLanguageLevel.LUA54))
+        assertTrue(TableCompletionProvider.isValidLuaBareKey("goto", LuaLanguageLevel.LUA51))
+        assertFalse(TableCompletionProvider.isValidLuaBareKey("goto", LuaLanguageLevel.LUA52))
+    }
+
+    fun testEscapedConstructorAndReadRenameTogether() {
+        val declarations = myFixture.addFileToProject("KeyType.lua", """
+            ---@class KeyType
+            ---@field a number
+            local KeyType = {}
+        """.trimIndent())
+        val usage = myFixture.configureByText("KeyUsage.lua", """
+            ---@type KeyType
+            local obj = { ["\97"] = 1 }
+            local id = obj['\x61']
+            local message = "\97"
+        """.trimIndent())
+        val field = declarations.findElementAt(declarations.text.indexOf("a number"))!!.parent
+        assertTrue(usage.findReferenceAt(usage.text.indexOf("\\x61"))!!.isReferenceTo(field))
+        myFixture.renameElement(field, "renamed")
+        assertTrue(usage.text.contains("[\"renamed\"] = 1"))
+        assertTrue(usage.text.contains("obj['renamed']"))
+        assertTrue(usage.text.contains("message = \"\\97\""))
+    }
+
     private fun checkSlotFields(source: String) {
         val declarations = myFixture.addFileToProject("Slots.lua", """
             ---@class LoadoutSnapshotSlot

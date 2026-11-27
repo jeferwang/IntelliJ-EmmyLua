@@ -44,7 +44,8 @@ fun inferExpr(expr: LuaExpr?, context: SearchContext): ITy {
 }
 
 private fun inferExprInner(expr: LuaExpr, context: SearchContext): ITy {
-    if ((expr is LuaTableExpr || expr is LuaParenExpr) && !(context.forStub && expr.stub != null)) {
+    if ((expr is LuaTableExpr || expr is LuaParenExpr) &&
+            (expr.stub == null || (expr.containingFile as? LuaPsiFile)?.isContentsLoaded == true)) {
         expr.leadingInlineDocTy()?.let { return it }
     }
     return when (expr) {

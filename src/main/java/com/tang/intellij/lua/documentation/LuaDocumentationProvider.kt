@@ -42,21 +42,22 @@ class LuaDocumentationProvider : AbstractDocumentationProvider(), DocumentationP
         }
     }
 
+    private fun documentationTarget(element: PsiElement): PsiElement {
+        val target = when (element) {
+            is LuaTableField -> element.reference?.resolve()
+            is LuaIndexExpr -> element.references.firstOrNull()?.resolve()
+            else -> null
+        }
+        return target?.takeUnless { element.manager.areElementsEquivalent(element, it) } ?: element
+    }
+
     override fun getQuickNavigateInfo(element: PsiElement?, originalElement: PsiElement?): String? {
-        if (element is LuaTableField) {
-            element.reference?.resolve()?.let { return getQuickNavigateInfo(it, originalElement) }
+        val target = element?.let(::documentationTarget)
+        if (target is LuaTypeGuessable) {
+            val ty = target.guessType(SearchContext.get(target.project))
+            return buildString { renderTy(this, ty, renderer) }
         }
-        if (element != null) {
-            when (element) {
-                is LuaTypeGuessable -> {
-                    val ty = element.guessType(SearchContext.get(element.project))
-                    return buildString {
-                        renderTy(this, ty, renderer)
-                    }
-                }
-            }
-        }
-        return super<AbstractDocumentationProvider>.getQuickNavigateInfo(element, originalElement)
+        return super<AbstractDocumentationProvider>.getQuickNavigateInfo(target, originalElement)
     }
 
     override fun getDocumentationElementForLookupItem(psiManager: PsiManager, obj: Any, element: PsiElement?): PsiElement? {
@@ -71,9 +72,10 @@ class LuaDocumentationProvider : AbstractDocumentationProvider(), DocumentationP
     }
 
     override fun generateDoc(element: PsiElement, originalElement: PsiElement?): String? {
-        if (element is LuaTableField) {
-            element.reference?.resolve()?.let { return generateDoc(it, originalElement) }
-        }
+        return generateTargetDoc(documentationTarget(element), originalElement)
+    }
+
+    private fun generateTargetDoc(element: PsiElement, originalElement: PsiElement?): String? {
         val sb = StringBuilder()
         val tyRenderer = renderer
         when (element) {

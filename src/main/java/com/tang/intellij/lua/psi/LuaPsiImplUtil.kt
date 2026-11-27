@@ -304,7 +304,7 @@ fun getName(indexExpr: LuaIndexExpr): String? {
     // var['name']
     val idExpr = indexExpr.idExpr
     if (idExpr != null)
-        return LuaString.getContent(idExpr.text).value
+        return LuaString.decodeOrNull(idExpr.text)
 
     return null
 }
@@ -316,7 +316,7 @@ fun setName(indexExpr: LuaIndexExpr, name: String): PsiElement {
     if (idExpr != null) {
         val text = idExpr.text
         val content = LuaString.getContent(text)
-        val newText = text.substring(0, content.start) + name + text.substring(content.end)
+        val newText = formatLuaStringLiteral(text, content, name)
         val newId = LuaElementFactory.createLiteral(indexExpr.project, newText)
         return idExpr.replace(newId)
     }
@@ -454,8 +454,8 @@ fun getReference(tableField: LuaTableField): PsiReference? {
     if (idExpr is LuaLiteralExpr && idExpr.kind == LuaLiteralKind.String) {
         val text = idExpr.text
         val content = LuaString.getContent(text)
-        val decoded = LuaString.decode(text, content)
-        if (content.length > 0 && decoded.isNotEmpty()) {
+        val decoded = LuaString.decodeOrNull(text, content)
+        if (!decoded.isNullOrEmpty()) {
             val range = TextRange.from(idExpr.startOffsetInParent + content.start, content.length)
             return LuaTableFieldReference(tableField, decoded, range)
         }
@@ -479,7 +479,7 @@ private fun escapeLuaQuotedString(value: String, quote: Char): String = buildStr
     }
 }
 
-private fun formatLuaStringLiteral(originalText: String, content: LuaString, newValue: String): String {
+internal fun formatLuaStringLiteral(originalText: String, content: LuaString, newValue: String): String {
     if (originalText.startsWith("[")) {
         val close = originalText.substring(content.end)
         if (!newValue.contains(close)) {
@@ -542,7 +542,7 @@ fun getName(tableField: LuaTableField): String? {
 
     val idExpr = tableField.idExpr
     if (idExpr is LuaLiteralExpr && idExpr.kind == LuaLiteralKind.String)
-        return LuaString.decode(idExpr.text)
+        return LuaString.decodeOrNull(idExpr.text)
     return null
 }
 

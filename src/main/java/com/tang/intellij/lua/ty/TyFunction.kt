@@ -243,6 +243,7 @@ class FunSignature(colonCall: Boolean,
             Ty.serialize(sig.returnTy, stream)
             stream.writeTyNullable(sig.varargTy)
             stream.writeParamInfoArray(sig.params)
+            stream.writeTyParams(sig.tyParameters)
         }
 
         fun deserialize(stream: StubInputStream): IFunSignature {
@@ -250,7 +251,7 @@ class FunSignature(colonCall: Boolean,
             val ret = Ty.deserialize(stream)
             val varargTy = stream.readTyNullable()
             val params = stream.readParamInfoArray()
-            return FunSignature(colonCall, ret, varargTy, params)
+            return FunSignature(colonCall, ret, varargTy, params, stream.readTyParams())
         }
     }
 }

@@ -3,6 +3,7 @@ package com.tang.intellij.lua.reference
 import com.intellij.openapi.application.QueryExecutorBase
 import com.intellij.openapi.progress.ProgressManager
 import com.intellij.openapi.project.DumbService
+import com.intellij.openapi.vfs.VirtualFile
 import com.intellij.psi.PsiElement
 import com.intellij.psi.PsiFile
 import com.intellij.psi.PsiManager
@@ -17,6 +18,7 @@ import com.intellij.util.Processor
 import com.intellij.util.indexing.FileBasedIndex
 import com.tang.intellij.lua.lang.type.LuaString
 import com.tang.intellij.lua.psi.LuaClassMember
+import com.tang.intellij.lua.psi.LuaIndexExpr
 import com.tang.intellij.lua.psi.LuaLiteralExpr
 import com.tang.intellij.lua.psi.LuaLiteralKind
 import com.tang.intellij.lua.psi.LuaPsiFile
@@ -38,17 +40,18 @@ class LuaEscapedTableFieldReferencesSearch :
 
         fun scanElement(root: PsiElement): Boolean {
             val chars: CharSequence = (root as? PsiFile)?.viewProvider?.contents ?: root.text
-            if (chars.indexOf('\\') < 0) return true
+            if (chars.indexOf('\\') < 0 || chars.indexOf('[') < 0) return true
             return PsiTreeUtil.processElements(root) { element ->
                 ProgressManager.checkCanceled()
-                if (element is LuaTableField) {
-                    val idExpr = element.idExpr
+                if (element is LuaTableField || element is LuaIndexExpr) {
+                    val idExpr = if (element is LuaTableField) element.idExpr else (element as LuaIndexExpr).idExpr
                     if (idExpr is LuaLiteralExpr && idExpr.kind == LuaLiteralKind.String) {
                         val rawText = idExpr.text
                         if (rawText.length >= 4 && (rawText[0] == '"' || rawText[0] == '\'') && '\\' in rawText) {
                             val content = LuaString.getContent(rawText)
-                            if (content.value != targetName && LuaString.decode(rawText, content) == targetName) {
-                                val ref = element.reference
+                            if (content.value != targetName && LuaString.decodeOrNull(rawText, content) == targetName) {
+                                val ref = if (element is LuaTableField) element.reference
+                                    else element.references.filterIsInstance<LuaIndexBracketReference>().firstOrNull()
                                 if (ref != null && ref.isReferenceTo(target) && !consumer.process(ref)) {
                                     return@processElements false
                                 }
@@ -69,6 +72,7 @@ class LuaEscapedTableFieldReferencesSearch :
             is GlobalSearchScope -> {
                 val key = IdIndexEntry("$ESCAPED_STRING_KEY_PREFIX$targetName", true)
                 val psiManager = PsiManager.getInstance(project)
+                val files = mutableListOf<VirtualFile>()
                 FileBasedIndex.getInstance().processFilesContainingAllKeys(
                     IdIndex.NAME,
                     listOf(key),
@@ -76,8 +80,13 @@ class LuaEscapedTableFieldReferencesSearch :
                     null
                 ) { vfile ->
                     ProgressManager.checkCanceled()
-                    val psiFile = psiManager.findFile(vfile) as? LuaPsiFile ?: return@processFilesContainingAllKeys true
-                    scanElement(psiFile)
+                    files.add(vfile)
+                }
+                for (vfile in files) {
+                    ProgressManager.checkCanceled()
+                    if (!vfile.isValid) continue
+                    val psiFile = psiManager.findFile(vfile) as? LuaPsiFile ?: continue
+                    if (!scanElement(psiFile)) return
                 }
             }
         }

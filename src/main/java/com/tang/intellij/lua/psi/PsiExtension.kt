@@ -22,6 +22,7 @@ import com.intellij.openapi.util.Computable
 import com.intellij.openapi.util.Key
 import com.intellij.openapi.util.text.StringUtil
 import com.intellij.psi.PsiElement
+import com.intellij.psi.PsiFile
 import com.intellij.psi.PsiWhiteSpace
 import com.intellij.psi.util.CachedValue
 import com.intellij.psi.util.CachedValueProvider
@@ -170,6 +171,10 @@ private fun isLocalReassigned(local: LuaNameDef, owner: LuaLocalDef): Boolean {
         val name = local.name
         var reassigned = false
         PsiTreeUtil.processElements(scope) { element ->
+            if (element is LuaFuncDef && element.name == name && resolveLocal(name, element) == local) {
+                reassigned = true
+                return@processElements false
+            }
             if (element is LuaAssignStat) {
                 for (lhs in element.varExprList.exprList) {
                     if (lhs is LuaNameExpr && lhs.name == name && resolveLocal(lhs) == local) {
@@ -184,27 +189,65 @@ private fun isLocalReassigned(local: LuaNameDef, owner: LuaLocalDef): Boolean {
     }
 }
 
+private val KEY_TABLE_MUTATED = Key.create<CachedValue<Boolean>>("lua.table_insert_mutated")
+private val KEY_SETMETATABLE_MUTATED = Key.create<CachedValue<Boolean>>("lua.setmetatable_mutated")
+
+private fun isGlobalBuiltinMutated(file: PsiFile, name: String, memberName: String?): Boolean {
+    if (file is LuaPsiFile && !file.isContentsLoaded) return true
+    val key = if (memberName == null) KEY_SETMETATABLE_MUTATED else KEY_TABLE_MUTATED
+    return CachedValuesManager.getCachedValue(file, key) {
+        fun global(expr: LuaExpr?): Boolean =
+            expr is LuaNameExpr && expr.name == name && resolveLocal(expr) == null
+
+        val unchanged = PsiTreeUtil.processElements(file) { element ->
+            val writes = when (element) {
+                is LuaAssignStat -> element.varExprList.exprList.any { lhs ->
+                    global(lhs) || (memberName != null && lhs is LuaIndexExpr &&
+                            lhs.name == memberName && global(lhs.prefixExpr))
+                }
+                is LuaFuncDef -> element.name == name && resolveLocal(name, element) == null
+                is LuaClassMethodDef -> memberName != null && element.name == memberName &&
+                        global(element.classMethodName.expr)
+                else -> false
+            }
+            !writes
+        }
+        CachedValueProvider.Result.create(!unchanged, file)
+    }
+}
+
 internal fun LuaCallExpr.standardTableCall(): StandardTableCall? {
+    val file = containingFile
+    if (file is LuaPsiFile && !file.isContentsLoaded) return null
     if (isMethodColonCall) return null
     var callee = expr
+    var alias: LuaNameDef? = null
+    var owner: LuaLocalDef? = null
     if (callee is LuaNameExpr) {
-        val local = resolveInFile(callee.name, callee, null)
-        if (local == null) return if (callee.name == "setmetatable") StandardTableCall.SET_METATABLE else null
-        if (local !is LuaNameDef) return null
-        val owner = PsiTreeUtil.getStubOrPsiParentOfType(local, LuaLocalDef::class.java) ?: return null
-        var init = owner.getExprFor(local) ?: return null
-        while (init is LuaParenExpr) init = init.expr ?: return null
-        callee = init
-        if (callee is LuaNameExpr && callee.name == "setmetatable" && resolveInFile(callee.name, callee, null) == null)
-            return if (isLocalReassigned(local, owner)) null else StandardTableCall.SET_METATABLE
-        if (callee !is LuaIndexExpr || callee.colon != null || callee.name != "insert") return null
-        val prefix = callee.prefixExpr as? LuaNameExpr ?: return null
-        return if (prefix.name == "table" && resolveInFile(prefix.name, prefix, null) == null && !isLocalReassigned(local, owner))
-            StandardTableCall.INSERT else null
+        val declaration = resolveInFile(callee.name, callee, null)
+        if (declaration != null) {
+            alias = declaration as? LuaNameDef ?: return null
+            owner = PsiTreeUtil.getStubOrPsiParentOfType(alias, LuaLocalDef::class.java) ?: return null
+            callee = owner.getExprFor(alias) ?: return null
+            while (callee is LuaParenExpr) callee = callee.expr ?: return null
+        }
     }
-    if (callee !is LuaIndexExpr || callee.colon != null || callee.name != "insert") return null
-    val prefix = callee.prefixExpr as? LuaNameExpr ?: return null
-    return if (prefix.name == "table" && resolveInFile(prefix.name, prefix, null) == null) StandardTableCall.INSERT else null
+    val builtin = when (callee) {
+        is LuaNameExpr -> {
+            if (callee.name != "setmetatable" || resolveInFile(callee.name, callee, null) != null ||
+                    isGlobalBuiltinMutated(file, "setmetatable", null)) return null
+            StandardTableCall.SET_METATABLE
+        }
+        is LuaIndexExpr -> {
+            if (callee.colon != null || callee.name != "insert") return null
+            val prefix = callee.prefixExpr as? LuaNameExpr ?: return null
+            if (prefix.name != "table" || resolveInFile(prefix.name, prefix, null) != null ||
+                    isGlobalBuiltinMutated(file, "table", "insert")) return null
+            StandardTableCall.INSERT
+        }
+        else -> return null
+    }
+    return if (alias != null && owner != null && isLocalReassigned(alias, owner)) null else builtin
 }
 
 internal fun resolveMetatableIndexType(mt: LuaExpr, context: SearchContext): ITy {
