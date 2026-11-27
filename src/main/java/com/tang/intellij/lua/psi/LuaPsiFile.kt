@@ -25,6 +25,7 @@ import com.intellij.psi.PsiElement
 import com.intellij.psi.util.CachedValue
 import com.intellij.psi.util.CachedValueProvider
 import com.intellij.psi.util.CachedValuesManager
+import com.intellij.testFramework.LightVirtualFile
 import com.tang.intellij.lua.Constants
 import com.tang.intellij.lua.comment.psi.api.LuaComment
 import com.tang.intellij.lua.lang.LuaFileType
@@ -47,8 +48,14 @@ open class LuaPsiFile(fileViewProvider: FileViewProvider) : PsiFileBase(fileView
         if (stub is LuaFileStub)
             return stub.uid
         val file = originalFile
-        val hashCode = file.viewProvider.contents.length
-        return "$name[$hashCode]"
+        val vfile = file.viewProvider.virtualFile
+        val url = vfile.url
+        val id = if (vfile !is LightVirtualFile || (vfile.path.isNotEmpty() && vfile.path != "/${file.name}")) {
+            fnv1a64Hex(url)
+        } else {
+            System.identityHashCode(file).toUInt().toString(16)
+        }
+        return "${file.name}[$id]"
     }
 
     val tooLarger: Boolean get() {
@@ -109,5 +116,14 @@ open class LuaPsiFile(fileViewProvider: FileViewProvider) : PsiFileBase(fileView
 
     companion object {
         private val KEY_CACHED_MODULE_NAME = Key.create<CachedValue<String?>>("lua.file.module.name")
+
+        private fun fnv1a64Hex(text: String): String {
+            var hash = -0x340d631b7bdddcdbL // 0xcbf29ce484222325UL
+            for (i in 0 until text.length) {
+                hash = hash xor text[i].code.toLong()
+                hash *= 0x100000001b3L
+            }
+            return java.lang.Long.toUnsignedString(hash, 16)
+        }
     }
 }

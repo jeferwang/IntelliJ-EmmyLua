@@ -1,11 +1,14 @@
 package com.tang.intellij.test
 
 import com.intellij.psi.PsiPolyVariantReference
+import com.intellij.psi.util.PsiTreeUtil
 import com.tang.intellij.lua.comment.psi.LuaDocTagField
 import com.tang.intellij.lua.editor.completion.TableCompletionProvider
 import com.tang.intellij.lua.lang.LuaLanguageLevel
 import com.tang.intellij.lua.lang.type.LuaString
 import com.tang.intellij.lua.project.LuaSettings
+import com.tang.intellij.lua.psi.LuaTableExpr
+import com.tang.intellij.lua.ty.getTableTypeName
 
 class TableFieldNavigationTest : LuaTestBase() {
     fun testStaticKeyDecodingAndBareKeyLevels() {
@@ -668,5 +671,13 @@ class TableFieldNavigationTest : LuaTestBase() {
         assertNull(file.findReferenceAt(file.text.indexOf("r1.onlyB") + 3)?.resolve())
         assertEquals(onlyBDecl, file.findReferenceAt(file.text.indexOf("r2.onlyB") + 3)?.resolve())
         assertNull(file.findReferenceAt(file.text.indexOf("r2.onlyA") + 3)?.resolve())
+    }
+
+    fun testSameNameSameLengthModulesHaveDistinctAnonymousTableIds() {
+        val modA = myFixture.addFileToProject("a/init.lua", "return { aa = 1 }")
+        val modB = myFixture.addFileToProject("b/init.lua", "return { bb = 1 }")
+        val tableA = PsiTreeUtil.findChildOfType(modA, LuaTableExpr::class.java)!!
+        val tableB = PsiTreeUtil.findChildOfType(modB, LuaTableExpr::class.java)!!
+        assertNotEquals(getTableTypeName(tableA), getTableTypeName(tableB))
     }
 }
