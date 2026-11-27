@@ -21,6 +21,7 @@ package com.tang.intellij.lua.psi
 import com.intellij.extapi.psi.StubBasedPsiElementBase
 import com.intellij.icons.AllIcons
 import com.intellij.navigation.ItemPresentation
+import com.intellij.openapi.util.TextRange
 import com.intellij.psi.*
 import com.intellij.psi.impl.source.resolve.reference.ReferenceProvidersRegistry
 import com.intellij.psi.search.GlobalSearchScope
@@ -453,8 +454,63 @@ fun getTextOffset(localFuncDef: PsiNameIdentifierOwner): Int {
     return localFuncDef.node.startOffset
 }
 
-fun getReference(tableField: LuaTableField): PsiReference? =
-    tableField.id?.let { LuaTableFieldReference(tableField, it) }
+fun getReference(tableField: LuaTableField): PsiReference? {
+    val id = tableField.id
+    if (id != null) {
+        return LuaTableFieldReference(tableField, id.text, TextRange.from(id.startOffsetInParent, id.textLength))
+    }
+    val idExpr = tableField.idExpr
+    if (idExpr is LuaLiteralExpr && idExpr.kind == LuaLiteralKind.String) {
+        val content = LuaString.getContent(idExpr.text)
+        if (content.length > 0 && content.value.isNotEmpty()) {
+            val range = TextRange.from(idExpr.startOffsetInParent + content.start, content.length)
+            return LuaTableFieldReference(tableField, content.value, range)
+        }
+    }
+    return null
+}
+
+private fun escapeLuaQuotedString(value: String, quote: Char): String = buildString(value.length) {
+    for (ch in value) {
+        when (ch) {
+            '\\' -> append("\\\\")
+            '\n' -> append("\\n")
+            '\r' -> append("\\r")
+            '\t' -> append("\\t")
+            quote -> {
+                append('\\')
+                append(quote)
+            }
+            else -> append(ch)
+        }
+    }
+}
+
+private fun formatLuaStringLiteral(originalText: String, content: LuaString, newValue: String): String {
+    if (originalText.startsWith("[")) {
+        val close = originalText.substring(content.end)
+        if (!newValue.contains(close)) {
+            return originalText.substring(0, content.start) + newValue + close
+        }
+        return "\"${escapeLuaQuotedString(newValue, '"')}\""
+    }
+    val quote = originalText.firstOrNull()?.takeIf { it == '"' || it == '\'' } ?: '"'
+    return "$quote${escapeLuaQuotedString(newValue, quote)}$quote"
+}
+
+fun setName(tableField: LuaTableField, name: String): PsiElement {
+    if (tableField.id != null)
+        return setName(tableField as PsiNameIdentifierOwner, name)
+    val idExpr = tableField.idExpr
+    if (idExpr is LuaLiteralExpr && idExpr.kind == LuaLiteralKind.String) {
+        val text = idExpr.text
+        val content = LuaString.getContent(text)
+        val newText = formatLuaStringLiteral(text, content, name)
+        val newId = LuaElementFactory.createLiteral(tableField.project, newText)
+        return idExpr.replace(newId)
+    }
+    return tableField
+}
 
 fun getNameIdentifier(tableField: LuaTableField): PsiElement? {
     val id = tableField.id

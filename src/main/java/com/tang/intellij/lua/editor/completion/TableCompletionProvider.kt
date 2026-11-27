@@ -24,10 +24,16 @@ import com.intellij.util.Processor
 import com.tang.intellij.lua.lang.LuaIcons
 import com.tang.intellij.lua.psi.LuaClassField
 import com.tang.intellij.lua.psi.LuaClassMember
+import com.tang.intellij.lua.psi.LuaNameExpr
 import com.tang.intellij.lua.psi.LuaTableExpr
+import com.tang.intellij.lua.psi.LuaTableField
+import com.tang.intellij.lua.psi.LuaTypes
 import com.tang.intellij.lua.psi.shouldBe
+import com.tang.intellij.lua.refactoring.LuaRefactoringUtil
 import com.tang.intellij.lua.search.SearchContext
 import com.tang.intellij.lua.ty.ITy
+import com.tang.intellij.lua.ty.isAnonymous
+import com.tang.intellij.lua.ty.isGlobal
 
 class TableCompletionProvider : ClassMemberCompletionProvider() {
 
@@ -55,6 +61,13 @@ class TableCompletionProvider : ClassMemberCompletionProvider() {
     override fun addCompletions(session: CompletionSession) {
         val completionParameters = session.parameters
         val completionResultSet = session.resultSet
+        val position = completionParameters.position
+        val tableField = PsiTreeUtil.getParentOfType(position, LuaTableField::class.java)
+        if (position.parent is LuaNameExpr && (tableField == null || tableField.id != null || tableField.lbrack != null)) {
+            return
+        }
+        val hasAssign = tableField?.node?.findChildByType(LuaTypes.ASSIGN) != null
+
         metaMethodNames.forEach {
             val b = LookupElementBuilder.create(it.key)
                     .withTypeText(it.value)
@@ -62,24 +75,37 @@ class TableCompletionProvider : ClassMemberCompletionProvider() {
             completionResultSet.addElement(b)
         }
 
-        val table = PsiTreeUtil.getParentOfType(completionParameters.position, LuaTableExpr::class.java)
+        val table = PsiTreeUtil.getParentOfType(position, LuaTableExpr::class.java)
         if (table != null) {
+            val existingKeys = HashSet<String>()
+            for (field in table.tableFieldList) {
+                if (field != tableField) {
+                    field.name?.let { existingKeys.add(it) }
+                }
+            }
+            val addedKeys = HashSet<String>()
             val project = table.project
+            val context = SearchContext.get(project)
             val prefixMatcher = completionResultSet.prefixMatcher
-            val ty = table.shouldBe(SearchContext.get(project))
+            val ty = table.shouldBe(context)
             ty.eachTopClass(Processor { luaType ->
-                val context = SearchContext.get(project)
-                luaType.lazyInit(context)
-                luaType.processMembers(context) { curType, member ->
-                    member.name?.let {
-                        if (prefixMatcher.prefixMatches(it)) {
-                            val className = curType.displayName
-                            if (member is LuaClassField) {
+                if (!luaType.isAnonymous && !luaType.isGlobal) {
+                    luaType.lazyInit(context)
+                    luaType.processMembers(context) { curType, member ->
+                        member.name?.let { name ->
+                            if (member is LuaClassField &&
+                                name !in existingKeys &&
+                                LuaRefactoringUtil.isLuaIdentifier(name) &&
+                                prefixMatcher.prefixMatches(name) &&
+                                addedKeys.add(name)
+                            ) {
+                                val className = curType.displayName
                                 addField(completionResultSet, curType === luaType, className, member, null, object : HandlerProcessor() {
                                     override fun process(element: LuaLookupElement, member: LuaClassMember, memberTy: ITy?): LookupElement {
-                                        element.itemText = element.itemText + " = "
-                                        element.lookupString = element.lookupString + " = "
-
+                                        if (!hasAssign) {
+                                            element.itemText = element.itemText + " = "
+                                            element.lookupString = element.lookupString + " = "
+                                        }
                                         return PrioritizedLookupElement.withPriority(element, 10.0)
                                     }
                                 })

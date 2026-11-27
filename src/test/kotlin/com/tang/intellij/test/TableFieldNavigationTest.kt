@@ -1,5 +1,6 @@
 package com.tang.intellij.test
 
+import com.intellij.psi.PsiPolyVariantReference
 import com.tang.intellij.lua.comment.psi.LuaDocTagField
 import com.tang.intellij.lua.project.LuaSettings
 
@@ -391,5 +392,77 @@ class TableFieldNavigationTest : LuaTestBase() {
         myFixture.renameElement(field, "slotItemId")
         assertTrue(file.text.contains("local item = { slotItemId = 1 }"))
         assertTrue(file.text.contains("local id = item.slotItemId"))
+    }
+
+    fun testBracketStringKeysNavigateAndRenameSafely() {
+        val declarations = myFixture.addFileToProject("Slots.lua", """
+            ---@class LoadoutSnapshotSlot
+            ---@field itemId number
+            ---@field count number
+            local snapshot = {}
+        """.trimIndent())
+        val file = myFixture.configureByText("BracketKeys.lua", """
+            local dynKey = "itemId"
+            ---@type LoadoutSnapshotSlot
+            local item = {
+                ["itemId"] = 1,
+                ['count'] = 2,
+                [dynKey] = 3,
+            }
+        """.trimIndent())
+        val field = declarations.findElementAt(declarations.text.indexOf("itemId"))!!.parent
+        val countField = declarations.findElementAt(declarations.text.indexOf("count"))!!.parent
+        val itemRef = file.findReferenceAt(file.text.indexOf("\"itemId\"") + 1)!!
+        assertEquals(field, itemRef.resolve())
+        assertTrue(itemRef.isReferenceTo(field))
+        assertEquals(countField, file.findReferenceAt(file.text.indexOf("'count'") + 1)?.resolve())
+        val dynTarget = file.findReferenceAt(file.text.indexOf("[dynKey]") + 1)?.resolve()
+        assertEquals(file.text.indexOf("dynKey"), dynTarget?.textOffset)
+
+        myFixture.renameElement(field, "slotItemId")
+        assertTrue(file.text.contains("[\"slotItemId\"] = 1"))
+    }
+
+    fun testAmbiguousUnionNavigatesToBothAndAvoidsUnsafeRename() {
+        val declarations = myFixture.addFileToProject("Unions.lua", """
+            ---@class BaseSlot
+            ---@field sharedId number
+            local BaseSlot = {}
+
+            ---@class SubSlotA : BaseSlot
+            ---@field itemId number
+            ---@field onlyA string
+            local SubSlotA = {}
+
+            ---@class SubSlotB : BaseSlot
+            ---@field itemId string
+            local SubSlotB = {}
+        """.trimIndent())
+        val file = myFixture.configureByText("UnionUsage.lua", """
+            ---@type SubSlotA|SubSlotB
+            local entry = {
+                itemId = 1,
+                sharedId = 2,
+                onlyA = "ok",
+            }
+        """.trimIndent())
+        val itemA = declarations.findElementAt(declarations.text.indexOf("itemId number"))!!.parent
+        val itemB = declarations.findElementAt(declarations.text.indexOf("itemId string"))!!.parent
+        val shared = declarations.findElementAt(declarations.text.indexOf("sharedId"))!!.parent
+        val onlyA = declarations.findElementAt(declarations.text.indexOf("onlyA"))!!.parent
+
+        val ambigRef = file.findReferenceAt(file.text.indexOf("itemId = 1")) as PsiPolyVariantReference
+        val results = ambigRef.multiResolve(false).mapNotNull { it.element }
+        assertEquals(2, results.size)
+        assertTrue(itemA in results && itemB in results)
+        assertNull(ambigRef.resolve())
+        assertFalse(ambigRef.isReferenceTo(itemA))
+        assertFalse(ambigRef.isReferenceTo(itemB))
+
+        val sharedRef = file.findReferenceAt(file.text.indexOf("sharedId = 2"))!!
+        assertEquals(shared, sharedRef.resolve())
+        assertTrue(sharedRef.isReferenceTo(shared))
+
+        assertEquals(onlyA, file.findReferenceAt(file.text.indexOf("onlyA = \"ok\""))?.resolve())
     }
 }

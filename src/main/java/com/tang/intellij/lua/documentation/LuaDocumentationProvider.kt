@@ -43,6 +43,9 @@ class LuaDocumentationProvider : AbstractDocumentationProvider(), DocumentationP
     }
 
     override fun getQuickNavigateInfo(element: PsiElement?, originalElement: PsiElement?): String? {
+        if (element is LuaTableField) {
+            element.reference?.resolve()?.let { return getQuickNavigateInfo(it, originalElement) }
+        }
         if (element != null) {
             when (element) {
                 is LuaTypeGuessable -> {
@@ -68,6 +71,9 @@ class LuaDocumentationProvider : AbstractDocumentationProvider(), DocumentationP
     }
 
     override fun generateDoc(element: PsiElement, originalElement: PsiElement?): String? {
+        if (element is LuaTableField) {
+            element.reference?.resolve()?.let { return generateDoc(it, originalElement) }
+        }
         val sb = StringBuilder()
         val tyRenderer = renderer
         when (element) {
