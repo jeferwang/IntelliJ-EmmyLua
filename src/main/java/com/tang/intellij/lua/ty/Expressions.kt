@@ -113,18 +113,20 @@ private fun guessBinaryOpType(binaryExpr : LuaBinaryExpr, context:SearchContext)
     return infer(lhs, context)
 }
 
-fun LuaCallExpr.createSubstitutor(sig: IFunSignature, context: SearchContext): ITySubstitutor? {
+fun LuaCallExpr.createSubstitutor(sig: IFunSignature, context: SearchContext, excludeArgIndex: Int = -1): ITySubstitutor? {
     if (sig.isGeneric()) {
-        val list = mutableListOf<ITy>()
+        val list = mutableListOf<ITy?>()
         // self type
         if (this.isMethodColonCall) {
             this.prefixExpr?.let { prefix ->
                 list.add(prefix.guessType(context))
             }
         }
-        this.argList.map { list.add(it.guessType(context)) }
+        argList.forEachIndexed { index, arg ->
+            list.add(if (index == excludeArgIndex) null else arg.guessType(context))
+        }
         val map = mutableMapOf<String, ITy>()
-        var processedIndex = -1
+        var processedIndex = if (sig.colonCall) 0 else -1
         sig.tyParameters.forEach { map[it.name] = Ty.UNKNOWN }
         sig.processArgs { index, param ->
             val arg = list.getOrNull(index)
@@ -136,9 +138,11 @@ fun LuaCallExpr.createSubstitutor(sig: IFunSignature, context: SearchContext): I
         }
         // vararg
         val varargTy = sig.varargTy
-        if (varargTy != null && processedIndex < list.lastIndex) {
-            val argTy = list[processedIndex + 1]
-            GenericAnalyzer(argTy, varargTy).analyze(map)
+        if (varargTy != null) {
+            for (i in processedIndex + 1 until list.size) {
+                val argTy = list[i] ?: continue
+                GenericAnalyzer(argTy, varargTy).analyze(map)
+            }
         }
         sig.tyParameters.forEach {
             val superCls = it.superClassName
@@ -181,6 +185,15 @@ private fun LuaCallExpr.infer(context: SearchContext): ITy {
     }
 
     var ret: ITy = Ty.UNKNOWN
+    if (!context.forStub && context.index <= 0 && standardTableCall() == StandardTableCall.SET_METATABLE) {
+        val args = argList
+        if (args.size == 2) {
+            ret = context.withIndex(0) {
+                val indexTy = resolveMetatableIndexType(args[1], context)
+                indexTy.union(args[0].guessType(context))
+            }
+        }
+    }
     val ty = TyAliasSubstitutor.substitute(infer(expr, context), context)
     TyUnion.each(ty) {
         when (it) {

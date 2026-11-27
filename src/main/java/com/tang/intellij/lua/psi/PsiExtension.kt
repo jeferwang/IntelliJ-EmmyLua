@@ -112,24 +112,7 @@ private fun LuaExpr.shouldBeInternal(context: SearchContext): ITy {
         }
     } else if (p1 is LuaArgs) {
         val p2 = p1.parent
-        if (p2 is LuaCallExpr) {
-            val idx = p1.getIndexFor(this)
-            val fTy = TyAliasSubstitutor.substitute(infer(p2.expr, context), context)
-            var ret: ITy = Ty.UNKNOWN
-            fTy.each {
-                if (it is ITyFunction) {
-                    it.process { signature ->
-                        var solvedSignature = signature
-                        val substitutor = p2.createSubstitutor(solvedSignature, context)
-                        if (substitutor != null) solvedSignature = solvedSignature.substitute(substitutor)
-
-                        ret = ret.union(solvedSignature.getParamTyEx(p2, idx))
-                        true
-                    }
-                }
-            }
-            return ret
-        }
+        if (p2 is LuaCallExpr) return p2.expectedArgumentType(p1.getIndexFor(this), context)
     } else if (p1 is LuaTableField) {
         val tbl = p1.parent as? LuaTableExpr ?: return Ty.UNKNOWN
         val key = p1.idExpr
@@ -170,6 +153,100 @@ private fun LuaExpr.shouldBeInternal(context: SearchContext): ITy {
         return fieldType
     }
     return Ty.UNKNOWN
+}
+
+internal enum class StandardTableCall { INSERT, SET_METATABLE }
+
+internal fun LuaCallExpr.standardTableCall(): StandardTableCall? {
+    if (isMethodColonCall) return null
+    var callee = expr
+    if (callee is LuaNameExpr) {
+        val local = resolveLocal(callee)
+        if (local == null) return if (callee.name == "setmetatable") StandardTableCall.SET_METATABLE else null
+        if (local !is LuaNameDef) return null
+        val owner = PsiTreeUtil.getStubOrPsiParentOfType(local, LuaLocalDef::class.java)
+        callee = owner?.getExprFor(local) ?: return null
+        if (callee is LuaNameExpr && callee.name == "setmetatable" && resolveLocal(callee) == null)
+            return StandardTableCall.SET_METATABLE
+    }
+    if (callee !is LuaIndexExpr || callee.colon != null || callee.name != "insert") return null
+    val prefix = callee.prefixExpr as? LuaNameExpr ?: return null
+    return if (prefix.name == "table" && resolveLocal(prefix) == null) StandardTableCall.INSERT else null
+}
+
+internal fun resolveMetatableIndexType(mt: LuaExpr, context: SearchContext): ITy {
+    var result: ITy = Ty.UNKNOWN
+    fun collect(member: LuaTypeGuessable?) {
+        member?.guessType(context)?.each {
+            if (it is ITyClass && !it.isAnonymous && !it.isGlobal) result = result.union(it)
+        }
+    }
+    var cur: LuaExpr? = mt
+    while (cur is LuaParenExpr) cur = cur.expr
+    if (cur is LuaTableExpr) {
+        collect(cur.findField("__index")?.valueExpr)
+    } else if (cur != null) {
+        cur.guessType(context).eachTopClass { cls ->
+            collect(cls.findMember("__index", context))
+            true
+        }
+    }
+    return result
+}
+
+private fun LuaCallExpr.expectedArgumentType(index: Int, context: SearchContext): ITy {
+    val args = argList
+    when (standardTableCall()) {
+        StandardTableCall.INSERT -> if (args.size in 2..3 && index == args.lastIndex) {
+            var element: ITy = Ty.UNKNOWN
+            args[0].guessType(context).each {
+                if (it is ITyArray) element = element.union(it.base)
+                if (it is ITyGeneric && it.isTableGeneric()) element = element.union(it.getParamTy(1))
+            }
+            if (!Ty.isInvalid(element)) return element
+        }
+        StandardTableCall.SET_METATABLE -> if (index == 0) {
+            val outer = shouldBe(context)
+            if (hasConcreteExpectedType(outer)) return outer
+            args.getOrNull(1)?.let {
+                val indexTy = resolveMetatableIndexType(it, context)
+                if (!Ty.isInvalid(indexTy)) return indexTy
+            }
+        }
+        null -> Unit
+    }
+
+    val selected = mutableListOf<IFunSignature>()
+    var bestTier = Int.MAX_VALUE
+    val colon = isMethodColonCall
+    expr.guessType(context).each { ty ->
+        if (ty is ITyFunction) ty.process { sig ->
+            val fixed = when {
+                colon && !sig.colonCall -> (sig.params.size - 1).coerceAtLeast(0)
+                !colon && sig.colonCall -> sig.params.size + 1
+                else -> sig.params.size
+            }
+            val tier = when {
+                args.size == fixed || (sig.hasVarargs() && args.size >= fixed) -> 0
+                args.size < fixed -> 1
+                else -> 2
+            }
+            if (tier < bestTier) {
+                bestTier = tier
+                selected.clear()
+            }
+            if (tier == bestTier) selected.add(sig)
+            true
+        }
+    }
+    val self = TySelfSubstitutor(project, this)
+    var result: ITy = Ty.UNKNOWN
+    for (sig in selected) {
+        val param = sig.getParamTyEx(this, index)
+        val generic = createSubstitutor(sig, context, excludeArgIndex = index)
+        result = result.union((generic?.let { param.substitute(it) } ?: param).substitute(self))
+    }
+    return result
 }
 
 private fun hasConcreteExpectedType(ty: ITy): Boolean = when (ty) {

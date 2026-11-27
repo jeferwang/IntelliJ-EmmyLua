@@ -37,20 +37,20 @@ interface IFunSignature {
 }
 
 fun IFunSignature.getParamTyEx(callExpr: LuaCallExpr, index: Int): ITy {
-    var t: ITy = Ty.UNKNOWN
+    var fixed: ITy? = null
     processArgs(callExpr) { i, param ->
         if (i == index) {
-            t = param.ty
+            fixed = param.ty
             false
         } else true
     }
-    return t
+    return fixed ?: (if (index >= 0) varargTy else null) ?: Ty.UNKNOWN
 }
 
 fun IFunSignature.processArgs(callExpr: LuaCallExpr, processor: (index:Int, param: LuaParamInfo) -> Boolean) {
     val expr = callExpr.expr
-    val thisTy = if (expr is LuaIndexExpr) {
-        expr.guessType(SearchContext.get(expr.project))
+    val thisTy = if (colonCall && !callExpr.isMethodColonCall && expr is LuaIndexExpr) {
+        expr.prefixExpr.guessType(SearchContext.get(expr.project))
     } else null
     processArgs(thisTy, callExpr.isMethodColonCall, processor)
 }

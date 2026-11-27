@@ -1,21 +1,24 @@
 package com.tang.intellij.test
 
 import com.tang.intellij.lua.comment.psi.LuaDocTagField
+import com.tang.intellij.lua.project.LuaSettings
 
 class TableFieldNavigationTest : LuaTestBase() {
     private fun checkSlotFields(source: String) {
         val declarations = myFixture.addFileToProject("Slots.lua", """
             ---@class LoadoutSnapshotSlot
             ---@field itemId number
+            ---@field count number
             LoadoutSnapshotSlot = {}
         """.trimIndent())
         val file = myFixture.configureByText("Usage.lua", source.trimIndent())
-        val offsets = Regex("\\bitemId\\b").findAll(file.text).map { it.range.first }.toList()
-        assertTrue(offsets.isNotEmpty())
-        for (offset in offsets) {
+        val fields = Regex("\\b(itemId|count)\\b").findAll(file.text).toList()
+        assertTrue(fields.isNotEmpty())
+        for (field in fields) {
+            val offset = field.range.first
             val target = file.findReferenceAt(offset)?.resolve() as? LuaDocTagField
             assertEquals("field at offset $offset", declarations, target?.containingFile)
-            assertEquals(declarations.text.indexOf("itemId"), target?.textOffset)
+            assertEquals(declarations.text.indexOf(field.value), target?.textOffset)
         }
     }
 
@@ -190,6 +193,110 @@ class TableFieldNavigationTest : LuaTestBase() {
             assertNull(file.findReferenceAt(offset)?.resolve())
         }
         assertNull(file.findReferenceAt(file.text.lastIndexOf("itemId"))?.resolve())
+    }
+
+    fun testInsertArgumentFields() = checkSlotFields("""
+        ---@type LoadoutSnapshotSlot[]
+        local list = {}
+        table.insert(list, { itemId = 1 })
+        table.insert(list, 1, { itemId = 2 })
+        local insert = table.insert
+        insert(list, { itemId = 3 })
+        ---@type table<number, LoadoutSnapshotSlot>
+        local map = {}
+        table.insert(map, { itemId = 4 })
+    """)
+
+    fun testMetatableArgumentAndResultFields() = checkSlotFields("""
+        ---@return LoadoutSnapshotSlot
+        local function make(mt) return setmetatable({ itemId = 1 }, mt) end
+        ---@type LoadoutSnapshotSlot
+        local typed = setmetatable({ itemId = 2 }, {})
+        LoadoutSnapshotSlot.__index = LoadoutSnapshotSlot
+        local obj = setmetatable({ itemId = 3 }, LoadoutSnapshotSlot)
+        local n = obj.count
+        local set = setmetatable
+        local other = set({ itemId = 4 }, { __index = LoadoutSnapshotSlot })
+        n = other.count
+    """)
+
+    fun testUnverifiedMetatableAndShadowedBuiltins() {
+        val file = myFixture.configureByText("Shadowed.lua", """
+            ---@class Meta
+            ---@field key number
+            local Meta = {}
+            local obj = setmetatable({ key = 1 }, Meta)
+            local function fake(...) end
+            local setmetatable = fake
+            local alias = setmetatable
+            local other = alias({ key = 2 }, { __index = Meta })
+            local table = { insert = fake }
+            ---@type Meta[]
+            local list = {}
+            table.insert(list, { key = 3 })
+        """.trimIndent())
+        for (i in 1..3) {
+            val offset = file.text.indexOf("key = $i")
+            assertTrue(offset >= 0)
+            assertNull(file.findReferenceAt(offset)?.resolve())
+        }
+    }
+
+    fun testVarargsAndMethodReceivers() = checkSlotFields("""
+        ---@vararg LoadoutSnapshotSlot
+        local function take(...) end
+        take({ itemId = 1 }, { itemId = 2 })
+        ---@param other self
+        function LoadoutSnapshotSlot:merge(other) end
+        ---@type LoadoutSnapshotSlot
+        local slot
+        slot:merge({ itemId = 3 })
+        function LoadoutSnapshotSlot:copy() end
+        LoadoutSnapshotSlot.copy({ itemId = 4 })
+    """)
+
+    fun testOverloadAritySelectsTheFieldOwner() {
+        val file = myFixture.configureByText("Overloads.lua", """
+            ---@class A
+            ---@field key number
+            local A = {}
+            ---@class B
+            ---@field key string
+            local B = {}
+            ---@overload fun(x: A)
+            ---@param x B
+            ---@param n number
+            local function take(x, n) end
+            take({ key = 1 })
+            take({ key = "two" }, 2)
+        """.trimIndent())
+        for ((usage, declaration) in listOf("key = 1" to "key number", "key = \"two\"" to "key string")) {
+            val target = file.findReferenceAt(file.text.indexOf(usage))?.resolve()
+            assertEquals(file.text.indexOf(declaration), target?.textOffset)
+        }
+    }
+
+    fun testGenericArgumentUsesSiblingEvidence() {
+        val settings = LuaSettings.instance
+        val previous = settings.enableGeneric
+        settings.enableGeneric = true
+        try {
+            checkSlotFields("""
+                ---@generic T
+                ---@param list T[]
+                ---@param value T
+                local function push(list, value) end
+                ---@type LoadoutSnapshotSlot[]
+                local slots = {}
+                push(slots, { itemId = 1 })
+                ---@generic T
+                ---@vararg T
+                local function take(...) end
+                take({ itemId = 2 }, slots[1])
+            """)
+        } finally {
+            settings.enableGeneric = previous
+        }
     }
 
     fun testUnannotatedClosureReturnKeyRemainsADeclaration() {
