@@ -20,6 +20,7 @@ import org.gradle.api.tasks.compile.JavaCompile
 import org.gradle.jvm.toolchain.JavaLanguageVersion
 import org.jetbrains.intellij.platform.gradle.tasks.PrepareSandboxTask
 import org.jetbrains.kotlin.gradle.dsl.JvmTarget
+import org.jetbrains.kotlin.gradle.tasks.KotlinCompile
 import java.io.ByteArrayOutputStream
 
 plugins {
@@ -171,6 +172,7 @@ project(":") {
         implementation("org.scala-sbt.ipcsocket:ipcsocket:1.3.0")
         implementation("org.luaj:luaj-jse:3.0.1")
         implementation("com.jgoodies:forms:1.2.1")
+        testImplementation("junit:junit:4.13.2")
         intellijPlatform {
             if (localIde.isPresent) {
                 local(localIde.get())
@@ -246,7 +248,7 @@ project(":") {
             dependsOn("installEmmyDebugger")
         }
 
-        compileKotlin {
+        withType<KotlinCompile> {
             compilerOptions {
                 jvmTarget.set(JvmTarget.fromTarget(buildVersionData.jvmTarget))
             }
