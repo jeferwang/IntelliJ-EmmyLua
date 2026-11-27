@@ -65,4 +65,24 @@ class TableFieldNavigationTest : LuaTestBase() {
         val readTarget = file.findReferenceAt(file.text.lastIndexOf("itemId"))?.resolve()
         assertEquals(keyOffset, readTarget?.textOffset)
     }
+
+    fun testRenameAnnotatedFieldUpdatesTableConstructorKeys() {
+        val declarations = myFixture.addFileToProject("Slots.lua", """
+            ---@class LoadoutSnapshotSlot
+            ---@field itemId number
+            local snapshot = {}
+        """.trimIndent())
+        val file = myFixture.configureByText("Model.lua", """
+            ---@type LoadoutSnapshotSlot
+            local item = { itemId = 1 }
+            local id = item.itemId
+        """.trimIndent())
+        val field = declarations.findElementAt(declarations.text.indexOf("itemId"))!!.parent
+        val keyRef = file.findReferenceAt(file.text.indexOf("itemId"))!!
+        assertTrue(keyRef.isReferenceTo(field))
+        assertFalse(keyRef.isReferenceTo(file))
+        myFixture.renameElement(field, "slotItemId")
+        assertTrue(file.text.contains("local item = { slotItemId = 1 }"))
+        assertTrue(file.text.contains("local id = item.slotItemId"))
+    }
 }
