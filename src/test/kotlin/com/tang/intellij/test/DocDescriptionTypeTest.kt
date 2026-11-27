@@ -16,18 +16,17 @@ class DocDescriptionTypeTest : LuaTestBase() {
             local loadout = {}
 
             ---@param slot number @LoadoutSlotName，预购用
-            ---@param altSlot number @LoadoutSlotName预购用
+            ---@param joined number @LoadoutSlotName预购用
             ---@param count number @剩余数量
             ---@return number removed @卸下前的数量
-            function loadout.remove(slot, altSlot, count) end
+            function loadout.remove(slot, joined, count) end
         """.trimIndent())
         val highlights = myFixture.doHighlighting().filter {
             it.forcedTextAttributesKey == LuaHighlightingData.CLASS_REFERENCE
         }
         for ((marker, name) in listOf(
             "@CategoryId；" to "CategoryId",
-            "@LoadoutSlotName，" to "LoadoutSlotName",
-            "@LoadoutSlotName预购用" to "LoadoutSlotName"
+            "@LoadoutSlotName，" to "LoadoutSlotName"
         )) {
             val start = file.text.indexOf(marker) + 1
             val reference = file.findReferenceAt(start)!!
@@ -39,6 +38,9 @@ class DocDescriptionTypeTest : LuaTestBase() {
             assertFalse(reference.isReferenceTo(file))
             assertTrue(highlights.any { it.startOffset == start && it.endOffset == start + name.length })
         }
+        val joinedStart = file.text.indexOf("@LoadoutSlotName预购用") + 1
+        assertNull(file.findReferenceAt(joinedStart))
+        assertFalse(highlights.any { joinedStart in it.startOffset until it.endOffset })
         val prose = file.text.indexOf("剩余数量")
         assertNull(file.findReferenceAt(prose))
         assertFalse(highlights.any { prose in it.startOffset until it.endOffset })

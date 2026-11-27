@@ -23,7 +23,8 @@ abstract class LuaDocCommentStringMixin(node: ASTNode) : ASTWrapperPsiElement(no
     }
 
     private companion object {
-        val typeName = Regex("""^[A-Za-z_][A-Za-z0-9_]*+(?:\.[A-Za-z_][A-Za-z0-9_]*+)*+""")
+        // Match ASCII type names only at IntelliJ word boundaries so Find Usages / Rename stay consistent.
+        val typeName = Regex("""^[A-Za-z_][A-Za-z0-9_]*+(?:\.[A-Za-z_][A-Za-z0-9_]*+)*+(?!\p{javaJavaIdentifierPart})""")
     }
 }
 
