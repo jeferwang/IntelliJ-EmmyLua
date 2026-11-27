@@ -291,11 +291,9 @@ internal fun resolveMetatableIndexType(mt: LuaExpr, context: SearchContext): ITy
     return result
 }
 
-internal fun LuaCallExpr.selectCandidateSignatures(calleeTy: ITy): List<IFunSignature> {
+internal fun selectSignaturesByArity(calleeTy: ITy, argCount: Int, colon: Boolean): List<IFunSignature> {
     val selected = mutableListOf<IFunSignature>()
     var bestTier = Int.MAX_VALUE
-    val argCount = argList.size
-    val colon = isMethodColonCall
     calleeTy.each { ty ->
         if (ty is ITyFunction) ty.process { sig ->
             val fixed = when {
@@ -319,18 +317,82 @@ internal fun LuaCallExpr.selectCandidateSignatures(calleeTy: ITy): List<IFunSign
     return selected
 }
 
+internal fun LuaCallExpr.selectCandidateSignatures(calleeTy: ITy): List<IFunSignature> =
+    selectSignaturesByArity(calleeTy, argList.size, isMethodColonCall)
+
+internal fun resolveRawTableFieldType(tblExpr: LuaExpr, keyExpr: LuaExpr, context: SearchContext): ITy {
+    val tblTy = TyAliasSubstitutor.substitute(context.withIndex(0) { tblExpr.guessType(context) }, context)
+    var key: LuaExpr = keyExpr
+    while (key is LuaParenExpr) key = key.expr ?: return Ty.UNKNOWN
+    val results = mutableListOf<ITy>()
+    if (key is LuaLiteralExpr && key.kind == LuaLiteralKind.String) {
+        val fieldName = LuaString.decodeOrNull(key.text) ?: return Ty.UNKNOWN
+        if (fieldName.isEmpty()) return Ty.UNKNOWN
+        tblTy.eachTopClass { cls ->
+            cls.findMemberType(fieldName, context)?.let {
+                results.add(it.substitute(TySelfSubstitutor(tblExpr.project, null, cls)))
+            }
+            true
+        }
+        tblTy.each {
+            if (it is ITyGeneric && it.isTableGeneric() && acceptsStringKey(it.getParamTy(0), fieldName)) {
+                results.add(it.getParamTy(1))
+            }
+        }
+    } else {
+        val keyTy = context.withIndex(0) { key.guessType(context) }
+        tblTy.each {
+            if (it is ITyArray && acceptsArrayKey(keyTy)) results.add(it.base)
+            if (it is ITyGeneric && it.isTableGeneric() && acceptsIndexKey(it.getParamTy(0), keyTy, null)) {
+                results.add(it.getParamTy(1))
+            }
+        }
+    }
+    return TyUnion.unionAll(results)
+}
+
+internal fun prependTupleSlot(first: ITy, tail: ITy): ITy {
+    if (Ty.isInvalid(tail)) return first
+    if (tail is TyTuple) {
+        val list = ArrayList<ITy>(tail.list.size + 1)
+        list.add(first)
+        list.addAll(tail.list)
+        return TyTuple(list)
+    }
+    if (tail is TyUnion && tail.getChildTypes().any { it is TyTuple }) {
+        val arms = ArrayList<ITy>(tail.size)
+        TyUnion.each(tail) { alt ->
+            if (alt is TyTuple) {
+                val list = ArrayList<ITy>(alt.list.size + 1)
+                list.add(first)
+                list.addAll(alt.list)
+                arms.add(TyTuple(list))
+            } else {
+                arms.add(TyTuple(listOf(first, alt)))
+            }
+        }
+        return TyUnion.unionAll(arms)
+    }
+    return TyTuple(listOf(first, tail))
+}
+
 private fun LuaCallExpr.expectedArgumentType(index: Int, context: SearchContext): ITy {
     val args = argList
-    when (standardTableCall()) {
-        StandardTableCall.INSERT -> if (args.size in 2..3 && index == args.lastIndex) {
-            var element: ITy = Ty.UNKNOWN
-            args[0].guessType(context).each {
-                if (it is ITyArray) element = element.union(it.base)
-                if (it is ITyGeneric && it.isTableGeneric()) element = element.union(it.getParamTy(1))
+    val builtin = if (isMethodColonCall) null else resolveStandardBuiltin(expr)
+    when (builtin) {
+        "table.insert" -> if (args.size in 2..3 && index == args.lastIndex) {
+            val tblTy = TyAliasSubstitutor.substitute(context.withIndex(0) { args[0].guessType(context) }, context)
+            val elements = mutableListOf<ITy>()
+            tblTy.each {
+                if (it is ITyArray) elements.add(it.base)
+                if (it is ITyGeneric && it.isTableGeneric() && acceptsIndexKey(it.getParamTy(0), Ty.NUMBER, null)) {
+                    elements.add(it.getParamTy(1))
+                }
             }
+            val element = TyUnion.unionAll(elements)
             if (!Ty.isInvalid(element)) return element
         }
-        StandardTableCall.SET_METATABLE -> if (index == 0) {
+        "setmetatable" -> if (index == 0) {
             val outer = shouldBe(context)
             if (hasConcreteExpectedType(outer)) return outer
             args.getOrNull(1)?.let {
@@ -338,7 +400,39 @@ private fun LuaCallExpr.expectedArgumentType(index: Int, context: SearchContext)
                 if (!Ty.isInvalid(indexTy)) return indexTy
             }
         }
-        null -> Unit
+        "rawset" -> if (args.size >= 3 && index == 2) {
+            val rawTy = resolveRawTableFieldType(args[0], args[1], context)
+            if (!Ty.isInvalid(rawTy)) return rawTy
+        }
+        "pcall", "xpcall" -> {
+            val argOffset = if (builtin == "pcall") 1 else 2
+            if (index >= argOffset && args.isNotEmpty()) {
+                val fnExpr = args[0]
+                val fnTy = TyAliasSubstitutor.substitute(context.withIndex(0) { fnExpr.guessType(context) }, context)
+                val forwardedIndex = index - argOffset
+                val sigs = selectSignaturesByArity(fnTy, args.size - argOffset, colon = false)
+                val selfReceiver = (fnExpr as? LuaIndexExpr)?.prefixExpr?.let {
+                    context.withIndex(0) { it.guessType(context) }
+                }
+                val selfSub = TySelfSubstitutor(project, null, selfReceiver)
+                val results = mutableListOf<ITy>()
+                for (sig in sigs) {
+                    val param = if (sig.colonCall) {
+                        when {
+                            forwardedIndex == 0 -> selfReceiver ?: Ty.UNKNOWN
+                            forwardedIndex - 1 < sig.params.size -> sig.getParamTy(forwardedIndex - 1)
+                            else -> sig.varargTy ?: Ty.UNKNOWN
+                        }
+                    } else {
+                        if (forwardedIndex < sig.params.size) sig.getParamTy(forwardedIndex)
+                        else sig.varargTy ?: Ty.UNKNOWN
+                    }
+                    results.add(param.substitute(selfSub))
+                }
+                val forwarded = TyUnion.unionAll(results)
+                if (!Ty.isInvalid(forwarded)) return forwarded
+            }
+        }
     }
 
     val selected = selectCandidateSignatures(expr.guessType(context))

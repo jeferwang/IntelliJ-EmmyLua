@@ -730,4 +730,70 @@ class TableFieldNavigationTest : LuaTestBase() {
         assertEquals(itemIdDecl, file.findReferenceAt(file.text.indexOf("itemId = 3"))?.resolve())
         assertNull(file.findReferenceAt(file.text.indexOf("bagId = \"c\""))?.resolve())
     }
+
+    fun testBranchAwareModuleReturnsAndStdlibForwarding() {
+        val declarations = myFixture.addFileToProject("StdDecls.lua", """
+            ---@class SlotA
+            ---@field itemId number
+            local SlotA = {}
+
+            ---@class SlotB
+            ---@field bagId string
+            local SlotB = {}
+
+            ---@class Box
+            ---@field slot SlotA
+            local Box = {}
+        """.trimIndent())
+        myFixture.addFileToProject("branchMod.lua", """
+            if flag then
+                ---@type SlotA
+                return { itemId = 1 }
+            else
+                ---@type SlotB
+                return { bagId = "x" }
+            end
+        """.trimIndent())
+        val file = myFixture.configureByText("StdUsage.lua", """
+            local mod = require("branchMod")
+            local m1 = mod.itemId
+            local m2 = mod.bagId
+
+            ---@param s SlotA
+            ---@return number, SlotB
+            local function takeAndReturn(s) end
+            local ok, n, sb = pcall(takeAndReturn, { itemId = 10 })
+            local fromPcall = sb.bagId
+
+            local ok2, n2, sb2 = xpcall(takeAndReturn, errHandler, { itemId = 11 })
+            local fromXpcall = sb2.bagId
+
+            ---@type Box
+            local box = {}
+            rawset(box, "slot", { itemId = 12 })
+            local rg = rawget(box, "slot")
+            local fromRawget = rg.itemId
+
+            ---@type SlotA[]
+            local slots = {}
+            local u1, u2 = table.unpack(slots)
+            local fromUnpack = u2.itemId
+
+            local picked = select(2, "skip", rg)
+            local fromSelect = picked.itemId
+        """.trimIndent())
+        val itemIdDecl = declarations.findElementAt(declarations.text.indexOf("itemId number"))!!.parent
+        val bagIdDecl = declarations.findElementAt(declarations.text.indexOf("bagId string"))!!.parent
+
+        assertEquals(itemIdDecl, file.findReferenceAt(file.text.indexOf("mod.itemId") + 4)?.resolve())
+        assertEquals(bagIdDecl, file.findReferenceAt(file.text.indexOf("mod.bagId") + 4)?.resolve())
+        assertEquals(itemIdDecl, file.findReferenceAt(file.text.indexOf("itemId = 10"))?.resolve())
+        assertEquals(bagIdDecl, file.findReferenceAt(file.text.indexOf("sb.bagId") + 3)?.resolve())
+        assertEquals(itemIdDecl, file.findReferenceAt(file.text.indexOf("itemId = 11"))?.resolve())
+        assertEquals(bagIdDecl, file.findReferenceAt(file.text.indexOf("sb2.bagId") + 4)?.resolve())
+        assertEquals(itemIdDecl, file.findReferenceAt(file.text.indexOf("itemId = 12"))?.resolve())
+        assertEquals(itemIdDecl, file.findReferenceAt(file.text.indexOf("rg.itemId") + 3)?.resolve())
+        assertEquals(itemIdDecl, file.findReferenceAt(file.text.indexOf("u2.itemId") + 3)?.resolve())
+        assertEquals(itemIdDecl, file.findReferenceAt(file.text.indexOf("picked.itemId") + 7)?.resolve())
+    }
 }

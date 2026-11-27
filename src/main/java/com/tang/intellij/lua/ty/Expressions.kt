@@ -23,6 +23,7 @@ import com.intellij.psi.util.PsiTreeUtil
 import com.intellij.util.Processor
 import com.tang.intellij.lua.Constants
 import com.tang.intellij.lua.ext.recursionGuard
+import com.tang.intellij.lua.lang.type.LuaString
 import com.tang.intellij.lua.project.LuaSettings
 import com.tang.intellij.lua.psi.*
 import com.tang.intellij.lua.psi.impl.LuaNameExprMixin
@@ -188,12 +189,78 @@ private fun LuaCallExpr.infer(context: SearchContext): ITy {
     }
 
     var ret: ITy = Ty.UNKNOWN
-    if (!context.forStub && context.index <= 0 && standardTableCall() == StandardTableCall.SET_METATABLE) {
+    if (!context.forStub && !isMethodColonCall) {
         val args = argList
-        if (args.size == 2) {
-            ret = context.withIndex(0) {
-                val indexTy = resolveMetatableIndexType(args[1], context)
-                indexTy.union(args[0].guessType(context))
+        when (val builtin = resolveStandardBuiltin(expr)) {
+            "setmetatable" -> if (context.index <= 0 && args.size == 2) {
+                ret = context.withIndex(0) {
+                    val indexTy = resolveMetatableIndexType(args[1], context)
+                    indexTy.union(args[0].guessType(context))
+                }
+            }
+            "rawget" -> if (context.index <= 0 && args.size >= 2) {
+                val rawTy = resolveRawTableFieldType(args[0], args[1], context)
+                if (!Ty.isInvalid(rawTy)) return rawTy
+            }
+            "rawset" -> if (context.index <= 0 && args.isNotEmpty()) {
+                val tblTy = context.withIndex(0) { args[0].guessType(context) }
+                if (!Ty.isInvalid(tblTy)) return tblTy
+            }
+            "table.unpack", "unpack" -> if (args.isNotEmpty()) {
+                val listTy = TyAliasSubstitutor.substitute(context.withIndex(0) { args[0].guessType(context) }, context)
+                val elems = mutableListOf<ITy>()
+                listTy.each {
+                    if (it is ITyArray) elems.add(it.base)
+                    if (it is ITyGeneric && it.isTableGeneric() && acceptsIndexKey(it.getParamTy(0), Ty.NUMBER, null)) {
+                        elems.add(it.getParamTy(1))
+                    }
+                }
+                val elemTy = TyUnion.unionAll(elems)
+                if (!Ty.isInvalid(elemTy)) return elemTy
+            }
+            "select" -> if (args.isNotEmpty()) {
+                var selector: LuaExpr = args[0]
+                while (selector is LuaParenExpr) selector = selector.expr ?: break
+                if (selector is LuaLiteralExpr) {
+                    if (selector.kind == LuaLiteralKind.String && LuaString.decodeOrNull(selector.text) == "#") {
+                        return if (context.index <= 0) Ty.NUMBER else Ty.UNKNOWN
+                    }
+                    if (selector.kind == LuaLiteralKind.Number) {
+                        val n = selector.text.toIntOrNull()
+                        if (n != null && n >= 1) {
+                            val shifted = args.drop(n)
+                            if (shifted.isEmpty()) return Ty.UNKNOWN
+                            if (context.guessTuple()) return adjustExprList(shifted, context)
+                            val idx = context.index
+                            if (idx < shifted.size) return context.withIndex(0) { shifted[idx].guessType(context) }
+                            val last = shifted.last()
+                            return if (last.isMultiReturnExpandable())
+                                context.withIndex(idx - shifted.lastIndex) { last.guessType(context) }
+                            else Ty.UNKNOWN
+                        }
+                    }
+                }
+            }
+            "pcall", "xpcall" -> {
+                val argOffset = if (builtin == "pcall") 1 else 2
+                if (args.size >= argOffset) {
+                    if (context.index == 0) return Ty.BOOLEAN
+                    val fnExpr = args[0]
+                    val fnTy = TyAliasSubstitutor.substitute(context.withIndex(0) { fnExpr.guessType(context) }, context)
+                    val sigs = selectSignaturesByArity(fnTy, args.size - argOffset, colon = false)
+                    val selfReceiver = (fnExpr as? LuaIndexExpr)?.prefixExpr?.let {
+                        context.withIndex(0) { it.guessType(context) }
+                    }
+                    val selfSub = TySelfSubstitutor(project, null, selfReceiver)
+                    val fnRets = mutableListOf<ITy>()
+                    for (sig in sigs) {
+                        val r = sig.returnTy.substitute(selfSub)
+                        if (!Ty.isInvalid(r)) fnRets.add(r)
+                    }
+                    val fnRetTy = TyUnion.unionAll(fnRets)
+                    if (context.index > 0) return extractReturnSlot(fnRetTy, context.index - 1)
+                    if (context.guessTuple()) return prependTupleSlot(Ty.BOOLEAN, fnRetTy)
+                }
             }
         }
     }

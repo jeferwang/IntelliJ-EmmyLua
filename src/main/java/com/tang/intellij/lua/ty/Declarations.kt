@@ -18,6 +18,7 @@ package com.tang.intellij.lua.ty
 
 import com.intellij.extapi.psi.StubBasedPsiElementBase
 import com.intellij.openapi.util.Computable
+import com.intellij.psi.stubs.StubElement
 import com.intellij.psi.util.PsiTreeUtil
 import com.tang.intellij.lua.Constants
 import com.tang.intellij.lua.comment.LuaCommentUtil
@@ -181,30 +182,48 @@ private fun LuaTableField.infer(context: SearchContext): ITy {
     return if (valueExpr != null) infer(valueExpr, context) else Ty.UNKNOWN
 }
 
+private fun collectFileReturnsFromStub(parent: StubElement<*>, context: SearchContext, acc: MutableList<ITy>) {
+    for (child in parent.childrenStubs) {
+        when (val psi = child.psi) {
+            is LuaReturnStat -> acc.add(guessReturnType(psi, 0, context))
+            is LuaDoStat,
+            is LuaIfStat,
+            is LuaWhileStat,
+            is LuaForAStat,
+            is LuaForBStat,
+            is LuaRepeatStat -> collectFileReturnsFromStub(child, context, acc)
+        }
+    }
+}
+
 private fun inferFile(file: LuaPsiFile, context: SearchContext): ITy {
     return recursionGuard(file, Computable {
         val moduleName = file.moduleName
         if (moduleName != null)
             TyLazyClass(moduleName)
         else {
+            val acc = mutableListOf<ITy>()
             val stub = file.stub
             if (stub != null) {
-                val statStub = stub.childrenStubs.lastOrNull { it.psi is LuaReturnStat }
-                val stat = statStub?.psi
-                if (stat is LuaReturnStat)
-                    guessReturnType(stat, 0, context)
-                else null
+                collectFileReturnsFromStub(stub, context, acc)
             } else {
-                val lastChild = file.lastChild
-                var stat: LuaReturnStat? = null
-                LuaPsiTreeUtil.walkTopLevelInFile(lastChild, LuaReturnStat::class.java) {
-                    stat = it
-                    false
-                }
-                if (stat != null)
-                    guessReturnType(stat, 0, context)
-                else null
+                file.acceptChildren(object : LuaRecursiveVisitor() {
+                    override fun visitReturnStat(o: LuaReturnStat) {
+                        acc.add(guessReturnType(o, 0, context))
+                    }
+
+                    override fun visitExprStat(o: LuaExprStat) {}
+                    override fun visitLabelStat(o: LuaLabelStat) {}
+                    override fun visitAssignStat(o: LuaAssignStat) {}
+                    override fun visitGotoStat(o: LuaGotoStat) {}
+                    override fun visitClassMethodDef(o: LuaClassMethodDef) {}
+                    override fun visitFuncDef(o: LuaFuncDef) {}
+                    override fun visitLocalDef(o: LuaLocalDef) {}
+                    override fun visitLocalFuncDef(o: LuaLocalFuncDef) {}
+                    override fun visitClosureExpr(o: LuaClosureExpr) {}
+                })
             }
+            TyUnion.unionAll(acc)
         }
     }) ?: Ty.UNKNOWN
 }
