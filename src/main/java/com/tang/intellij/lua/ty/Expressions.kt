@@ -245,19 +245,19 @@ private fun LuaCallExpr.infer(context: SearchContext): ITy {
                 }
                 val elemTy = TyUnion.unionAll(elems)
                 if (!Ty.isInvalid(elemTy)) {
-                    val startBound = args.getOrNull(1)?.let(::constantIntLiteral) ?: 1
-                    val endBound = args.getOrNull(2)?.let(::constantIntLiteral)
+                    val startBound = args.getOrNull(1)?.let(::constantIntLiteral)?.toLong() ?: 1L
+                    val endBound = args.getOrNull(2)?.let(::constantIntLiteral)?.toLong()
                     if (args.size >= 3 && endBound != null) {
-                        val count = (endBound - startBound + 1).coerceAtLeast(0)
+                        val count = (endBound - startBound + 1L).coerceAtLeast(0L)
                         if (context.index >= 0) {
-                            return if (context.index < count) elemTy else Ty.UNKNOWN
+                            return if (context.index.toLong() < count) elemTy else Ty.UNKNOWN
                         }
                         if (context.guessTuple()) {
                             return when {
-                                count <= 0 -> Ty.UNKNOWN
-                                count == 1 -> elemTy
-                                count <= 16 -> TyTuple(List(count) { elemTy })
-                                else -> elemTy
+                                count <= 0L -> Ty.UNKNOWN
+                                count == 1L -> elemTy
+                                count <= 16L -> TyTuple(List(count.toInt()) { elemTy })
+                                else -> Ty.UNKNOWN
                             }
                         }
                     }
@@ -267,20 +267,30 @@ private fun LuaCallExpr.infer(context: SearchContext): ITy {
             "select" -> if (args.isNotEmpty()) {
                 var selector: LuaExpr = args[0]
                 while (selector is LuaParenExpr) selector = selector.expr ?: break
-                if (selector is LuaLiteralExpr) {
-                    if (selector.kind == LuaLiteralKind.String && LuaString.decodeOrNull(selector.text) == "#") {
+                if (selector is LuaLiteralExpr || selector is LuaUnaryExpr) {
+                    if (selector is LuaLiteralExpr && selector.kind == LuaLiteralKind.String && LuaString.decodeOrNull(selector.text) == "#") {
                         return if (context.index <= 0) Ty.NUMBER else Ty.UNKNOWN
                     }
                     val n = constantIntLiteral(selector)
-                    if (n != null && n >= 1) {
+                    if (n != null && n != 0) {
                         val valueArgs = args.drop(1)
                         if (valueArgs.isEmpty()) return Ty.UNKNOWN
-                        val skip = n - 1
-                        if (context.guessTuple()) {
-                            val full = adjustExprList(valueArgs, context)
-                            return dropTupleSlots(full, skip)
+                        val skipLong: Long = if (n > 0) {
+                            n.toLong() - 1L
+                        } else {
+                            if (valueArgs.last().isMultiReturnExpandable()) return Ty.UNKNOWN
+                            val fromEnd = valueArgs.size.toLong() + n.toLong()
+                            if (fromEnd < 0L) return Ty.UNKNOWN
+                            fromEnd
                         }
-                        val target = skip + context.index
+                        if (context.guessTuple()) {
+                            if (skipLong > Int.MAX_VALUE) return Ty.UNKNOWN
+                            val full = adjustExprList(valueArgs, context)
+                            return dropTupleSlots(full, skipLong.toInt())
+                        }
+                        val targetLong = skipLong + context.index.toLong()
+                        if (targetLong < 0L || targetLong > Int.MAX_VALUE) return Ty.UNKNOWN
+                        val target = targetLong.toInt()
                         if (target < valueArgs.size) {
                             return context.withIndex(0) { valueArgs[target].guessType(context) }
                         }
@@ -310,20 +320,20 @@ private fun LuaCallExpr.infer(context: SearchContext): ITy {
                         if (!Ty.isInvalid(r)) fnRets.add(r)
                     }
                     val fnRetTy = TyUnion.unionAll(fnRets)
-                    val handlerRetTy = if (builtin == "xpcall") {
+                    val failurePayloadTy = if (builtin == "xpcall") {
                         val hTy = TyAliasSubstitutor.substitute(context.withIndex(0) { args[1].guessType(context) }, context)
                         val hSigs = selectSignaturesByArity(hTy, 1, colon = false)
                         val hRets = hSigs.map { extractReturnSlot(it.returnTy, 0) }.filter { !Ty.isInvalid(it) }
                         TyUnion.unionAll(hRets)
-                    } else Ty.UNKNOWN
+                    } else Ty.STRING
                     if (context.index > 0) {
                         val successSlot = extractReturnSlot(fnRetTy, context.index - 1)
-                        return if (context.index == 1 && !Ty.isInvalid(handlerRetTy)) successSlot.union(handlerRetTy) else successSlot
+                        return if (context.index == 1 && !Ty.isInvalid(failurePayloadTy)) successSlot.union(failurePayloadTy) else successSlot
                     }
                     if (context.guessTuple()) {
                         val successTuple = prependTupleSlot(Ty.BOOLEAN, fnRetTy)
-                        return if (!Ty.isInvalid(handlerRetTy)) {
-                            successTuple.union(TyTuple(listOf(Ty.BOOLEAN, handlerRetTy)))
+                        return if (!Ty.isInvalid(failurePayloadTy)) {
+                            successTuple.union(TyTuple(listOf(Ty.BOOLEAN, failurePayloadTy)))
                         } else successTuple
                     }
                 }

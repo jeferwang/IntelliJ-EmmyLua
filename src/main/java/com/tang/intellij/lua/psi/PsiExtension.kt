@@ -206,6 +206,16 @@ private fun mutatedGlobalsInFile(file: PsiFile): Set<String>? {
             if (cur !is LuaNameExpr) return null
             val local = resolveLocal(cur) ?: return cur.name
             if (local !is LuaNameDef) return null
+            // If `lib` was already rebound before this member write (e.g., `local lib = table; lib = {}; lib.insert = f`),
+            // this write no longer mutates the original global table.
+            var latestDecl: PsiElement? = null
+            LuaDeclarationTree.get(file).walkUp(cur) { decl ->
+                if (decl.name == cur.name) {
+                    latestDecl = decl.psi
+                    false
+                } else true
+            }
+            if (latestDecl != null && latestDecl != local) return null
             val owner = PsiTreeUtil.getStubOrPsiParentOfType(local, LuaLocalDef::class.java) ?: return null
             var init = owner.getExprFor(local) ?: return null
             while (init is LuaParenExpr) init = init.expr ?: return null
@@ -363,18 +373,19 @@ internal fun LuaCallExpr.selectCandidateSignatures(calleeTy: ITy, context: Searc
 
 private fun unwrapSetMetatableRawTarget(expr: LuaExpr): LuaExpr? {
     var cur: LuaExpr? = expr
-    while (cur is LuaParenExpr) cur = cur.expr
-    if (cur is LuaCallExpr && !cur.isMethodColonCall && resolveStandardBuiltin(cur.expr) == "setmetatable") {
-        return cur.argList.getOrNull(0)
-    }
-    if (cur is LuaNameExpr) {
-        val local = resolveLocal(cur) as? LuaNameDef ?: return null
-        val owner = PsiTreeUtil.getStubOrPsiParentOfType(local, LuaLocalDef::class.java) ?: return null
-        if (isLocalReassigned(local, owner)) return null
-        var init = owner.getExprFor(local) ?: return null
-        while (init is LuaParenExpr) init = init.expr ?: return null
-        if (init is LuaCallExpr && !init.isMethodColonCall && resolveStandardBuiltin(init.expr) == "setmetatable") {
-            return init.argList.getOrNull(0)
+    var depth = 0
+    while (cur != null && depth++ < 8) {
+        while (cur is LuaParenExpr) cur = cur.expr
+        if (cur is LuaCallExpr && !cur.isMethodColonCall && resolveStandardBuiltin(cur.expr) == "setmetatable") {
+            return cur.argList.getOrNull(0)
+        }
+        if (cur is LuaNameExpr) {
+            val local = resolveLocal(cur) as? LuaNameDef ?: return null
+            val owner = PsiTreeUtil.getStubOrPsiParentOfType(local, LuaLocalDef::class.java) ?: return null
+            if (isLocalReassigned(local, owner)) return null
+            cur = owner.getExprFor(local)
+        } else {
+            return null
         }
     }
     return null
